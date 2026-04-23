@@ -1,0 +1,9 @@
+node_modules/
+.env
+*.db
+*.sqlite
+data/
+credentials.json
+*.log
+health-bot-*.md
+.DS_Store
