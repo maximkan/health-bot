@@ -286,6 +286,11 @@ function startBot() {
             return;
           }
 
+          if (earlyIntents.includes('COACH_QUESTION') && !earlyIntents.some(i => ['PLAN','MEAL_LOG','WORKOUT_LOG','RECOVERY_LOG'].includes(i))) {
+            await handleAsk(bot, msg);
+            return;
+          }
+
           const isDone = earlyIntents.includes('GENERAL') && !earlyIntents.some(i => ['PLAN','MEAL_LOG','WORKOUT_LOG','RECOVERY_LOG'].includes(i))
             && /^(no|nah|nope|skip|none|that'?s? it|done|nothing|all good|that's all)$/i.test((msg.text||'').trim());
 
