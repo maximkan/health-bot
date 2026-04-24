@@ -168,6 +168,7 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
     // Tell Haiku explicitly what "tomorrow" means in this context
     const ctx = `${nowContext()}\nContext: user is setting plans for tomorrow. Tomorrow = ${defaultTomorrow}. Default all unspecified dates to ${defaultTomorrow}.`;
     const plans = await claude.parsePlans(text, ctx);
+    console.log(`[bedPlans] parsed:`, JSON.stringify(plans.map(p => ({ title: p.title, date: p.date, time: p.time }))));
     if (!plans.length) return null;
 
     const lines = [];
