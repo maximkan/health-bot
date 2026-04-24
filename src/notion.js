@@ -233,13 +233,14 @@ async function createSleepEntry(data) {
     }
   }
 
+  const fmtH = (h) => { if (h == null) return '?'; const m = Math.round(h * 60); return `${Math.floor(m/60)}h ${m%60}m`; };
   const children = isNap ? [
-    callout(`Nap ${bed_time} → ${wake_time}  ·  ${hours_slept}h`, '😪', 'yellow_background'),
+    callout(`Nap ${bed_time} → ${wake_time}  ·  ${fmtH(hours_slept)}`, '😪', 'yellow_background'),
   ] : [
-    callout(`${bed_time} → ${wake_time}  ·  ${hours_slept}h  ·  ${qualityStars(quality)}`, '😴', 'purple_background'),
+    callout(`${bed_time} → ${wake_time}  ·  ${fmtH(hours_slept)}  ·  ${qualityStars(quality)}`, '😴', 'purple_background'),
     para(`Bed:    ${bed_time}`),
     para(`Wake:   ${wake_time}`),
-    para(`Hours:  ${progressBar(hours_slept, 8, 'h')}`),
+    para(`Hours:  ${fmtH(hours_slept)}`),
     para(`Quality: ${qualityStars(quality)} (${quality}/5)`),
     ...(notes ? [divider, para(notes)] : []),
   ];

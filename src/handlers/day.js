@@ -8,15 +8,19 @@ const { stripMarkdown } = require('./ask');
 // ── Morning wake flow ─────────────────────────────────────────────────────────
 
 // wakeOverrideMs: if user said "woke up at 9am", pass the parsed timestamp
+function fmtHours(h) {
+  const totalMin = Math.round(h * 60);
+  const hh = Math.floor(totalMin / 60);
+  const mm = totalMin % 60;
+  return hh > 0 ? (mm > 0 ? `${hh}h ${mm}m` : `${hh}h`) : `${mm}m`;
+}
+
 async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
-  const wakeMs  = wakeOverrideMs || Date.now();
-  const bedMs   = state.bed_time ?? (wakeMs - 8 * 3600 * 1000);
-  const sleepMs = Math.max(0, wakeMs - bedMs - 20 * 60 * 1000);
-  const totalMin = Math.round(sleepMs / 60000);
-  const sleepH   = Math.round(sleepMs / 3600000 * 10) / 10;
-  const sh = Math.floor(totalMin / 60);
-  const sm = totalMin % 60;
-  const sleepStr = sh > 0 ? (sm > 0 ? `${sh}h ${sm}m` : `${sh}h`) : `${sm}m`;
+  const wakeMs   = wakeOverrideMs || Date.now();
+  const hasBed   = state.bed_time != null;
+  const bedMs    = hasBed ? state.bed_time : null;
+  const sleepH   = hasBed ? Math.round(Math.max(0, wakeMs - bedMs - 20 * 60 * 1000) / 3600000 * 10) / 10 : null;
+  const sleepStr = sleepH != null ? fmtHours(sleepH) : null;
 
   let prevTotals = null;
   if (state.current_day_start) {
@@ -26,27 +30,30 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
   db.setState(chatId, { status: 'awake', current_day_start: wakeMs });
   db.resetCaffeine(chatId);
 
-  await bot.sendMessage(chatId, `☀️ morning. ${sleepStr} sleep. quality? (1-5)`);
-  return { sleepH, sleepStr, bedMs, prevTotals, newDayStart: wakeMs };
+  const sleepLine = sleepStr ? `${sleepStr} sleep. ` : '';
+  await bot.sendMessage(chatId, `☀️ morning. ${sleepLine}quality? (1-5)`);
+  return { sleepH, sleepStr, bedMs: bedMs ?? (wakeMs - 8 * 3600 * 1000), prevTotals, newDayStart: wakeMs, hasBed };
 }
 
 async function processQuality(bot, chatId, quality, wakeData) {
-  const { sleepH, bedMs, newDayStart } = wakeData;
+  const { sleepH, bedMs, newDayStart, hasBed } = wakeData;
 
-  // Log sleep entry silently
-  try {
-    const OFFSET_MS = 8 * 60 * 60 * 1000;
-    const bedDateStr = new Date(bedMs + OFFSET_MS).toISOString().split('T')[0];
-    await notion.createSleepEntry({
-      bed_time:    tsToTimeStr(bedMs),
-      wake_time:   tsToTimeStr(newDayStart),
-      hours_slept: sleepH,
-      quality,
-      notes: '',
-      bed_date: bedDateStr,
-    });
-  } catch (err) {
-    console.error('Sleep log error:', err.message);
+  // Only log sleep if we actually know the bed time
+  if (hasBed && sleepH != null) {
+    try {
+      const OFFSET_MS = 8 * 60 * 60 * 1000;
+      const bedDateStr = new Date(bedMs + OFFSET_MS).toISOString().split('T')[0];
+      await notion.createSleepEntry({
+        bed_time:    tsToTimeStr(bedMs),
+        wake_time:   tsToTimeStr(newDayStart),
+        hours_slept: sleepH,
+        quality,
+        notes: '',
+        bed_date: bedDateStr,
+      });
+    } catch (err) {
+      console.error('Sleep log error:', err.message);
+    }
   }
 
   // Show today's plans only (bot + Google Calendar)
@@ -66,6 +73,7 @@ async function processQuality(bot, chatId, quality, wakeData) {
     const planId = db.savePlan(chatId, { text: event.title, date: todayStr, time: event.time });
     const [h, m] = event.time.split(':').map(Number);
     const fireMs = getDateAt(todayStr, h, m) - 15 * 60 * 1000; // 15 min before
+    if (fireMs <= Date.now()) continue; // skip events that have already passed
     const botRef = bot;
     scheduleOnce(chatId, fireMs, async () => {
       await botRef.sendMessage(chatId, `reminder: ${event.title} at ${event.time}`);

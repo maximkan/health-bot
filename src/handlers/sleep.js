@@ -8,9 +8,10 @@ async function handleSleep(bot, msg) {
     const data = await claude.parseSleep(msg.text || msg.caption || '');
     await notion.createSleepEntry(data);
     const isNap = data.type === 'Nap';
+    const fmtH = (h) => { if (h == null) return '?'; const m = Math.round(h * 60); return `${Math.floor(m/60)}h ${m%60}m`; };
     const label = isNap
-      ? `😪 Nap — ${data.bed_time} → ${data.wake_time} (${data.hours_slept}h)`
-      : `✅ Sleep — ${data.bed_time} → ${data.wake_time} (${data.hours_slept}h) quality ${data.quality}/5`;
+      ? `😪 Nap — ${data.bed_time} → ${data.wake_time} (${fmtH(data.hours_slept)})`
+      : `✅ Sleep — ${data.bed_time} → ${data.wake_time} (${fmtH(data.hours_slept)}) quality ${data.quality}/5`;
     await bot.sendMessage(chatId, label);
   } catch (err) {
     console.error('Sleep error:', err.message);
