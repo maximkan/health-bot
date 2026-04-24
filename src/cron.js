@@ -222,7 +222,8 @@ function rescheduleAll() {
   }
   if (pending.length) console.log(`✅ Rescheduled ${pending.length} persisted reminder(s)`);
 
-  // Also schedule any pending timed plans that have no reminder entry yet
+  // Schedule plans that have no reminder in DB yet (avoid duplicates)
+  const scheduledKeys = new Set(pending.map(r => `${r.chat_id}_${r.fire_ms}`));
   const { scheduleTimedPlanReminders } = require('./handlers/plans');
   const { getDateAt } = require('./utils/time');
   for (const chatId of db.getAllChatIds()) {
@@ -235,11 +236,11 @@ function rescheduleAll() {
       const reminderMs = eventMs - 30 * 60 * 1000;
       const minsUntil = (eventMs - Date.now()) / 60000;
 
-      if (reminderMs > Date.now()) {
-        // Normal: schedule via full reminder chain
+      if (reminderMs > Date.now() && !scheduledKeys.has(`${chatId}_${reminderMs}`)) {
+        // No existing reminder in DB — create one
         scheduleTimedPlanReminders(chatId, plan.id, { title: plan.plan_text, date: plan.plan_date, time: plan.plan_time });
-      } else if (minsUntil > 0 && minsUntil <= 60) {
-        // Reminder window passed but event still upcoming — fire immediately
+      } else if (minsUntil > 0 && minsUntil <= 60 && !scheduledKeys.has(`${chatId}_${reminderMs}`)) {
+        // Reminder window passed but event still upcoming and no DB entry — fire immediately
         _bot?.sendMessage(chatId, `heads up: ${plan.plan_text} at ${plan.plan_time} (in ${Math.round(minsUntil)} min)`).catch(() => {});
       }
     }

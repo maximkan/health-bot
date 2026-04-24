@@ -95,20 +95,6 @@ function scheduleTimedPlanReminders(chatId, planId, plan) {
     cronSvc.getBotRef()?.sendMessage(chatId, `${plan.title} in 30 min`).catch(() => {})
   );
 
-  // 1 hour after — check if done (not persisted, ephemeral nudge)
-  const checkMs = eventMs + 60 * 60 * 1000;
-  if (checkMs > Date.now()) {
-    cronSvc.scheduleOnce(chatId, checkMs, async () => {
-      const dbPlan = db.getAllPending(chatId).find(p => p.id === planId);
-      if (dbPlan && dbPlan.status !== 'done') {
-        try { await cronSvc.getBotRef()?.sendMessage(chatId, `did you do ${plan.title}?`); } catch {}
-        cronSvc.scheduleOnce(chatId, Date.now() + 2 * 3600 * 1000, () => {
-          db.updatePlanStatus(planId, 'skipped');
-        });
-      }
-    });
-  }
-
   // Night before at 9 PM
   const [yr, mo, dy] = plan.date.split('-').map(Number);
   const prevDayStr = new Date(Date.UTC(yr, mo - 1, dy - 1)).toISOString().split('T')[0];
@@ -123,10 +109,10 @@ async function handlePlanDone(bot, msg) {
   try {
     const pending = db.getAllPending(chatId);
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans to mark done.'); return; }
-    const last = pending[pending.length - 1];
-    db.updatePlanStatus(last.id, 'done');
-    if (last.notion_page_id) await notion.updatePlanStatusNotion(last.notion_page_id, 'Done').catch(() => {});
-    await bot.sendMessage(chatId, `✅ Done: ${last.plan_text}. Off your list.`);
+    const plan = await claude.matchPlanToModify(msg.text, pending);
+    db.updatePlanStatus(plan.id, 'done');
+    if (plan.notion_page_id) await notion.updatePlanStatusNotion(plan.notion_page_id, 'Done').catch(() => {});
+    await bot.sendMessage(chatId, `✅ Done: ${plan.plan_text}. Off your list.`);
   } catch (err) {
     console.error('Plan done error:', err.message);
     await bot.sendMessage(chatId, '❌ Could not update plan.');
@@ -139,11 +125,11 @@ async function handlePlanSkip(bot, msg) {
   try {
     const pending = db.getAllPending(chatId);
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans.'); return; }
-    const last = pending[pending.length - 1];
+    const plan = await claude.matchPlanToModify(msg.text, pending);
     const tomorrow = getTomorrowStr();
-    db.updatePlanStatus(last.id, 'skipped');
-    db.savePlan(chatId, { text: last.plan_text, date: tomorrow, time: null, recurring: 'one-time' });
-    await bot.sendMessage(chatId, `Moved to tomorrow: ${last.plan_text}.`);
+    db.updatePlanStatus(plan.id, 'skipped');
+    db.savePlan(chatId, { text: plan.plan_text, date: tomorrow, time: null, recurring: 'one-time' });
+    await bot.sendMessage(chatId, `Moved to tomorrow: ${plan.plan_text}.`);
   } catch (err) {
     console.error('Plan skip error:', err.message);
     await bot.sendMessage(chatId, '❌ Could not update plan.');

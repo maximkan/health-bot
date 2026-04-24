@@ -40,6 +40,8 @@ Return ALL intents that apply. Examples:
 "morning" → ["WAKE"]
 "sauna then chicken rice" → ["RECOVERY_LOG","MEAL_LOG"]
 "how much protein in eggs?" → ["COACH_QUESTION"]
+"is chicken rice a good option?" → ["COACH_QUESTION"]
+"would a burger fit my macros?" → ["COACH_QUESTION"]
 "gym tomorrow at 10am" → ["PLAN"]
 "change my lunch to 2pm" → ["CORRECTION"]
 "weighed 104kg this morning" → ["WEIGHT_LOG"]
@@ -60,6 +62,21 @@ async function classify(text) {
     const filtered = arr.filter(i => VALID.has(i));
     return filtered.length ? filtered : ['GENERAL'];
   } catch { return ['GENERAL']; }
+}
+
+// ── Plan matching for skip/done ───────────────────────────────────────────────
+
+async function matchPlanToModify(userText, plans) {
+  if (!plans.length) return null;
+  if (plans.length === 1) return plans[0];
+  const list = plans.map((p, i) => `${i + 1}. ${p.plan_text}${p.plan_date ? ' on ' + p.plan_date : ''}${p.plan_time ? ' at ' + p.plan_time : ''}`).join('\n');
+  const response = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 10,
+    system: 'Given a user message about a plan and a numbered list of plans, reply ONLY with the number of the best match, or 0 if none clearly match.',
+    messages: [{ role: 'user', content: `Message: "${userText}"\n\nPlans:\n${list}` }],
+  });
+  const n = parseInt(response.content[0].text.trim());
+  return (n >= 1 && n <= plans.length) ? plans[n - 1] : plans[plans.length - 1];
 }
 
 // ── Entry matching for deletion ───────────────────────────────────────────────
@@ -529,5 +546,5 @@ module.exports = {
   generateDaySummary, generateEveningCheck, generateWeeklyReview,
   generateFullAnalysis, checkProactivePatterns,
   chatGolf, parseGolfSession, analyzeGolfPhoto,
-  buildCoachSystem, matchEntryToDelete,
+  buildCoachSystem, matchEntryToDelete, matchPlanToModify,
 };

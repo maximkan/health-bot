@@ -25,7 +25,7 @@ const mediaGroups   = new Map();
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const isConfirmation = (t) => { const lc = (t||'').toLowerCase().trim(); return CONFIRM_WORDS.some(w => lc === w || lc.startsWith(w + ' ')); };
-const isCancellation = (t) => { const lc = (t||'').toLowerCase().trim(); return CANCEL_WORDS.some(w => lc === w || lc.startsWith(w + ' ')); };
+const isCancellation = (t) => { const lc = (t||'').toLowerCase().trim(); return CANCEL_WORDS.some(w => lc === w || /^(no|nope|cancel|skip|stop|abort)[^a-z]/i.test(lc) || lc.startsWith(w + ' ')); };
 const parseQuality   = (t) => { const m = (t||'').match(/\b([1-5])\b/); return m ? parseInt(m[1]) : null; };
 
 function isWakeTrigger(msg) {
