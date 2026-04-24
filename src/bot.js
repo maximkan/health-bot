@@ -425,13 +425,9 @@ function startBot() {
           await bot.sendMessage(chatId, '❌ Cancelled.');
           return;
         }
-        if (earlyIntents.includes('COACH_QUESTION') && !earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i))) {
-          pendingStates.delete(chatId);
-          await handleAsk(bot, msg);
-          return;
-        }
-        const isCorrectionIntent = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i));
-        if (!isCorrectionIntent) {
+        const isWCorrection = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i));
+
+        if (isConfirmation(text) && !isWCorrection) {
           pendingStates.delete(chatId);
           await logWorkout(bot, chatId, state.workoutData);
           if (state.catchupRetro) {
@@ -440,15 +436,31 @@ function startBot() {
           }
           return;
         }
-        // Apply correction and show revised preview
+
+        if (isWCorrection) {
+          pendingStates.delete(chatId);
+          await bot.sendChatAction(chatId, 'typing');
+          try {
+            const updated = await claude.applyWorkoutCorrection(state.workoutData, text);
+            await bot.sendMessage(chatId, formatWorkoutPreview(updated));
+            pendingStates.set(chatId, { type: 'workout_confirm', workoutData: updated, catchupRetro: state.catchupRetro });
+          } catch {
+            await bot.sendMessage(chatId, '❌ Could not apply correction.');
+          }
+          return;
+        }
+
+        if (earlyIntents.includes('COACH_QUESTION')) {
+          pendingStates.delete(chatId);
+          await handleAsk(bot, msg);
+          return;
+        }
+
         pendingStates.delete(chatId);
-        await bot.sendChatAction(chatId, 'typing');
-        try {
-          const updated = await claude.applyWorkoutCorrection(state.workoutData, text);
-          await bot.sendMessage(chatId, formatWorkoutPreview(updated));
-          pendingStates.set(chatId, { type: 'workout_confirm', workoutData: updated, catchupRetro: state.catchupRetro });
-        } catch {
-          await bot.sendMessage(chatId, '❌ Could not apply correction.');
+        await logWorkout(bot, chatId, state.workoutData);
+        if (state.catchupRetro) {
+          await bot.sendMessage(chatId, 'anything else? (or done)');
+          pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
         }
         return;
       }
@@ -485,18 +497,10 @@ function startBot() {
           return;
         }
 
-        // If user is asking a question, answer it — don't log
-        if (earlyIntents.includes('COACH_QUESTION') && !earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i))) {
-          pendingStates.delete(chatId);
-          await handleAsk(bot, msg);
-          return;
-        }
-
-        // Treat as correction only if the message looks like food/correction intent
         const isCorrectionIntent = earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i));
 
-        if (!isCorrectionIntent) {
-          // Anything else (ok, thanks, nice, sure, 👍, etc.) → just log
+        // Explicit confirmation → log immediately, never reroute
+        if (isConfirmation(text) && !isCorrectionIntent) {
           pendingStates.delete(chatId);
           await logMeal(bot, chatId, mealData, state.dayStart);
           if (state.catchupRetro) {
@@ -506,12 +510,30 @@ function startBot() {
           return;
         }
 
-        // Inline correction — show revised preview, loop back
+        // Correction → apply and loop
+        if (isCorrectionIntent) {
+          pendingStates.delete(chatId);
+          const updated = await applyCorrection(bot, chatId, mealData, text);
+          if (!updated) return;
+          await bot.sendMessage(chatId, formatPreview(updated));
+          pendingStates.set(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+          return;
+        }
+
+        // Question → answer it, drop the pending meal
+        if (earlyIntents.includes('COACH_QUESTION')) {
+          pendingStates.delete(chatId);
+          await handleAsk(bot, msg);
+          return;
+        }
+
+        // Anything else (ambiguous reply) → log
         pendingStates.delete(chatId);
-        const updated = await applyCorrection(bot, chatId, mealData, text);
-        if (!updated) return;
-        await bot.sendMessage(chatId, formatPreview(updated));
-        pendingStates.set(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+        await logMeal(bot, chatId, mealData, state.dayStart);
+        if (state.catchupRetro) {
+          await bot.sendMessage(chatId, 'anything else? (or done)');
+          pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+        }
         return;
       }
 
