@@ -189,7 +189,7 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
           const gcalEvent = await gcal.createEvent({ title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
           db.setPlanCalendar(planId);
           if (gcalEvent?.id) db.setPlanGCalId(planId, gcalEvent.id);
-        } catch {}
+        } catch (err) { console.error('Bed plans GCal error:', err.message); }
         lines.push(`${plan.title} @ ${plan.time}`);
       } else {
         lines.push(plan.title);
