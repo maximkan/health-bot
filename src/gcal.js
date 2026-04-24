@@ -26,7 +26,8 @@ async function createEvent(plan) {
     end:   { dateTime: endISO,   timeZone: 'Asia/Kuala_Lumpur' },
   };
   if (location) event.location = location;
-  if (guests.length) event.attendees = guests.map(e => ({ email: e }));
+  const validGuests = guests.filter(e => typeof e === 'string' && e.includes('@'));
+  if (validGuests.length) event.attendees = validGuests.map(e => ({ email: e }));
 
   const res = await calendar.events.insert({ calendarId: 'primary', resource: event });
   return res.data;
