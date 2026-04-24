@@ -65,7 +65,7 @@ async function processQuality(bot, chatId, quality, wakeData) {
   const dbTitles = new Set(timedToday.map(p => p.plan_text.toLowerCase()));
   const gcalExtra = gcalToday.filter(e => !dbTitles.has(e.title.toLowerCase()) && !e.allDay);
 
-  // Save GCal events to SQLite so reminders fire
+  // Save GCal events to SQLite so reminders fire (persisted to survive restarts)
   const { scheduleOnce } = require('../cron');
   const { getDateAt } = require('../utils/time');
   for (const event of gcalExtra) {
@@ -73,10 +73,13 @@ async function processQuality(bot, chatId, quality, wakeData) {
     const planId = db.savePlan(chatId, { text: event.title, date: todayStr, time: event.time });
     const [h, m] = event.time.split(':').map(Number);
     const fireMs = getDateAt(todayStr, h, m) - 15 * 60 * 1000; // 15 min before
-    if (fireMs <= Date.now()) continue; // skip events that have already passed
+    if (fireMs <= Date.now()) continue;
+    const reminderText = `reminder: ${event.title} at ${event.time}`;
+    const remId = db.saveReminder(chatId, fireMs, reminderText);
     const botRef = bot;
     scheduleOnce(chatId, fireMs, async () => {
-      await botRef.sendMessage(chatId, `reminder: ${event.title} at ${event.time}`);
+      db.markReminderFired(remId);
+      await botRef.sendMessage(chatId, reminderText);
     });
   }
 

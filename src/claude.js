@@ -30,7 +30,8 @@ Intents:
 - PLAN: creating a plan, reminder, event, scheduling something
 - PLAN_DONE: confirming a task is done
 - PLAN_SKIP: skipping or postponing a plan
-- CORRECTION: changing/fixing a previous log entry
+- CORRECTION: changing/fixing a previous log entry (time, values, etc.)
+- DELETE: deleting/removing a log entry ("delete my chicken rice", "remove today's lunch", "delete that workout")
 - COACH_QUESTION: asking a health, nutrition, or fitness question
 - GENERAL: greeting, thanks, anything else
 
@@ -55,10 +56,23 @@ async function classify(text) {
     if (!match) return ['GENERAL'];
     const arr = JSON.parse(match[0]);
     const VALID = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG',
-      'WEIGHT_LOG','BED','WAKE','PLAN','PLAN_DONE','PLAN_SKIP','CORRECTION','COACH_QUESTION','GENERAL']);
+      'WEIGHT_LOG','BED','WAKE','PLAN','PLAN_DONE','PLAN_SKIP','CORRECTION','DELETE','COACH_QUESTION','GENERAL']);
     const filtered = arr.filter(i => VALID.has(i));
     return filtered.length ? filtered : ['GENERAL'];
   } catch { return ['GENERAL']; }
+}
+
+// ── Entry matching for deletion ───────────────────────────────────────────────
+
+async function matchEntryToDelete(userText, entries) {
+  const list = entries.map((e, i) => `${i + 1}. [${e.label}] ${e.title}${e.extra ? ' — ' + e.extra : ''}`).join('\n');
+  const response = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 10,
+    system: 'Given a deletion request and a numbered list of log entries, reply ONLY with the number of the best match, or 0 if none clearly match.',
+    messages: [{ role: 'user', content: `Request: "${userText}"\n\nEntries:\n${list}` }],
+  });
+  const n = parseInt(response.content[0].text.trim());
+  return (n >= 1 && n <= entries.length) ? entries[n - 1] : null;
 }
 
 // ── Meal analysis ─────────────────────────────────────────────────────────────
@@ -500,5 +514,5 @@ module.exports = {
   generateDaySummary, generateEveningCheck, generateWeeklyReview,
   generateFullAnalysis, checkProactivePatterns,
   chatGolf, parseGolfSession, analyzeGolfPhoto,
-  buildCoachSystem,
+  buildCoachSystem, matchEntryToDelete,
 };

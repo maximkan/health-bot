@@ -49,6 +49,31 @@ async function downloadPhoto(bot, msg) {
   return Buffer.from(await res.arrayBuffer()).toString('base64');
 }
 
+async function handleDeletion(bot, msg, chatId, userState) {
+  await bot.sendChatAction(chatId, 'typing');
+  const dayStart = userState?.current_day_start;
+  try {
+    const entries = await notion.getTodayEntries(dayStart);
+    if (!entries.length) { await bot.sendMessage(chatId, 'Nothing logged today to delete.'); return; }
+
+    const match = await claude.matchEntryToDelete(msg.text, entries);
+    if (!match) {
+      // Can't determine — show list
+      const lines = ["Which entry to delete?\n", ...entries.map((e, i) => `${i+1}. [${e.label}] ${e.title}${e.extra ? ' — ' + e.extra : ''}`)];
+      lines.push('\nReply "delete N" to remove.');
+      pendingStates.set(chatId, { type: 'today_list', entries });
+      await bot.sendMessage(chatId, lines.join('\n'));
+      return;
+    }
+
+    await notion.deleteEntry(match.pageId);
+    await bot.sendMessage(chatId, `🗑 deleted: ${match.title}${match.extra ? ' — ' + match.extra : ''}`);
+  } catch (err) {
+    console.error('Delete error:', err.message);
+    await bot.sendMessage(chatId, '❌ Failed to delete. Try /today to see entries.');
+  }
+}
+
 async function maybeTriggerCatchup(bot, chatId, wakeData) {
   if (!wakeData?.prevDayStart) return;
   const { getMalaysiaDate } = require('./utils/time');
@@ -67,6 +92,11 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     pendingStates.delete(chatId);
     await day.handleBedTime(bot, chatId, userState);
     pendingStates.set(chatId, { type: 'bed_plans', pushback_sent: false });
+    return;
+  }
+
+  if (intents.includes('DELETE')) {
+    await handleDeletion(bot, msg, chatId, userState);
     return;
   }
 

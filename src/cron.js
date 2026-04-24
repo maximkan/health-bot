@@ -170,7 +170,15 @@ function scheduleOnce(chatId, atMs, fn) {
 }
 
 function rescheduleAll() {
-  // Nothing to reschedule from SQLite in new schema (plan reminders are re-registered at startup via plans handler)
+  db.cleanOldReminders();
+  const pending = db.getPendingReminders();
+  for (const r of pending) {
+    scheduleOnce(r.chat_id, r.fire_ms, async () => {
+      db.markReminderFired(r.id);
+      try { await _bot.sendMessage(r.chat_id, r.text); } catch (e) { console.error('Reminder send error:', e.message); }
+    });
+  }
+  if (pending.length) console.log(`✅ Rescheduled ${pending.length} pending reminder(s)`);
 }
 
 module.exports = { init, scheduleOnce, rescheduleAll, getBotRef };

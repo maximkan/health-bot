@@ -8,6 +8,13 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER,
+    fire_ms INTEGER,
+    text TEXT,
+    fired INTEGER DEFAULT 0
+  );
   CREATE TABLE IF NOT EXISTS user_state (
     chat_id INTEGER PRIMARY KEY,
     status TEXT DEFAULT 'sleeping',
@@ -85,6 +92,11 @@ const stmts = {
   setPlanCalendar: db.prepare("UPDATE plans SET calendar_event_created=1 WHERE id=?"),
   getLastPending: db.prepare("SELECT * FROM plans WHERE chat_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1"),
   getAllPending: db.prepare("SELECT * FROM plans WHERE chat_id=? AND status NOT IN ('done','skipped') ORDER BY plan_date,plan_time"),
+
+  saveReminder: db.prepare("INSERT INTO reminders (chat_id, fire_ms, text) VALUES (?, ?, ?)"),
+  getPendingReminders: db.prepare("SELECT * FROM reminders WHERE fired=0 AND fire_ms > ? ORDER BY fire_ms ASC"),
+  markReminderFired: db.prepare("UPDATE reminders SET fired=1 WHERE id=?"),
+  cleanOldReminders: db.prepare("DELETE FROM reminders WHERE fire_ms < ?"),
 
   saveReply: db.prepare("INSERT INTO coach_reply_chain (chat_id,role,content,timestamp,coach_message_id) VALUES (?,?,?,datetime('now'),?)"),
   getChain: db.prepare('SELECT * FROM coach_reply_chain WHERE chat_id=? AND coach_message_id=? ORDER BY id ASC LIMIT 10'),
@@ -173,6 +185,15 @@ function wasRecentlyActive(chatId, withinMinutes = 15) {
   return (Date.now() - lastMs) < withinMinutes * 60 * 1000;
 }
 
+// ── Reminders ─────────────────────────────────────────────────────────────────
+
+function saveReminder(chatId, fireMs, text) {
+  return stmts.saveReminder.run(chatId, fireMs, text).lastInsertRowid;
+}
+const getPendingReminders  = () => stmts.getPendingReminders.all(Date.now());
+const markReminderFired    = (id) => stmts.markReminderFired.run(id);
+const cleanOldReminders    = () => stmts.cleanOldReminders.run(Date.now() - 7 * 24 * 3600 * 1000);
+
 // ── Golf messages ─────────────────────────────────────────────────────────────
 
 const saveGolfMessage    = (chatId, role, content) => stmts.saveGolfMsg.run(chatId, role, content);
@@ -193,6 +214,7 @@ module.exports = {
   getLastPending, getAllPending,
   saveCoachMessage, getReplyChain, countExchanges, clearReplyChain,
   logMessage, getRecentMessages, wasRecentlyActive,
+  saveReminder, getPendingReminders, markReminderFired, cleanOldReminders,
   saveGolfMessage, getGolfHistory, getGolfMessageCount,
   deleteOldGolfMessages, clearGolfHistory, replaceGolfHistory,
 };
