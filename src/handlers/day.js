@@ -4,6 +4,7 @@ const gcal    = require('../gcal');
 const db      = require('../db');
 const { getMalaysiaDateStr, tsToTimeStr, nowContext, getTomorrowStr, getTodayStr, getActivityTomorrowStr, extractTimeMs } = require('../utils/time');
 const { stripMarkdown } = require('./ask');
+const { scheduleTimedPlanReminders } = require('./plans');
 
 // ── Morning wake flow ─────────────────────────────────────────────────────────
 
@@ -65,22 +66,11 @@ async function processQuality(bot, chatId, quality, wakeData) {
   const dbTitles = new Set(timedToday.map(p => p.plan_text.toLowerCase()));
   const gcalExtra = gcalToday.filter(e => !dbTitles.has(e.title.toLowerCase()) && !e.allDay);
 
-  // Save GCal events to SQLite so reminders fire (persisted to survive restarts)
-  const { scheduleOnce } = require('../cron');
-  const { getDateAt } = require('../utils/time');
+  // Save GCal events to SQLite and schedule reminders via same path as manual plans
   for (const event of gcalExtra) {
     if (!event.time) continue;
     const planId = db.savePlan(chatId, { text: event.title, date: todayStr, time: event.time });
-    const [h, m] = event.time.split(':').map(Number);
-    const fireMs = getDateAt(todayStr, h, m) - 15 * 60 * 1000; // 15 min before
-    if (fireMs <= Date.now()) continue;
-    const reminderText = `reminder: ${event.title} at ${event.time}`;
-    const remId = db.saveReminder(chatId, fireMs, reminderText);
-    const botRef = bot;
-    scheduleOnce(chatId, fireMs, async () => {
-      db.markReminderFired(remId);
-      await botRef.sendMessage(chatId, reminderText);
-    });
+    scheduleTimedPlanReminders(chatId, planId, { title: event.title, date: todayStr, time: event.time });
   }
 
   const allTimed = [
