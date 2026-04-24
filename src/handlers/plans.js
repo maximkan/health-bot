@@ -129,7 +129,13 @@ async function handlePlanSkip(bot, msg) {
     const plan = await claude.matchPlanToModify(msg.text, pending);
     db.updatePlanStatus(plan.id, 'skipped');
     if (plan.notion_page_id) await notion.updatePlanStatusNotion(plan.notion_page_id, 'Cancelled').catch(() => {});
-    if (plan.gcal_event_id) await gcal.deleteEvent(plan.gcal_event_id).catch(() => {});
+    if (plan.gcal_event_id) {
+      await gcal.deleteEvent(plan.gcal_event_id).catch(() => {});
+    } else if (plan.calendar_event_created && plan.plan_date && plan.plan_time) {
+      const events = await gcal.getEventsForDate(plan.plan_date).catch(() => []);
+      const match = events.find(e => e.title?.toLowerCase() === plan.plan_text?.toLowerCase() && e.time === plan.plan_time);
+      if (match?.id) await gcal.deleteEvent(match.id).catch(() => {});
+    }
     await bot.sendMessage(chatId, `Cancelled: ${plan.plan_text}.`);
   } catch (err) {
     console.error('Plan skip error:', err.message);
