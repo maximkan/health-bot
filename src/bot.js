@@ -6,13 +6,12 @@ const claude  = require('./claude');
 const notion  = require('./notion');
 const day     = require('./handlers/day');
 const { showMealPreview, logMeal, applyCorrection, formatPreview } = require('./handlers/meal');
-const { handleWorkout }     = require('./handlers/workout');
+const { showWorkoutPreview, logWorkout, formatWorkoutPreview } = require('./handlers/workout');
 const { handleRecovery }    = require('./handlers/recovery');
 const { handleSleep }       = require('./handlers/sleep');
 const { handleBody }        = require('./handlers/body');
 const { handleAsk, handleCoachReply, handlePhotoQuestion } = require('./handlers/ask');
 const { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans } = require('./handlers/plans');
-const { handleWorkoutDetails, hasPendingWorkout } = require('./handlers/workout');
 const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { buildTimeISO, nowContext, getMalaysiaDateStr, extractTimeMs, detectRetroDate } = require('./utils/time');
@@ -115,7 +114,11 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
 
   for (const intent of nonMeal) {
     switch (intent) {
-      case 'WORKOUT_LOG':   await handleWorkout(bot, msg);    break;
+      case 'WORKOUT_LOG': {
+        const wData = await showWorkoutPreview(bot, msg);
+        if (wData) pendingStates.set(chatId, { type: 'workout_confirm', workoutData: wData, catchupRetro: msg._catchupRetro });
+        break;
+      }
       case 'RECOVERY_LOG':  await handleRecovery(bot, msg);   break;
       case 'SLEEP_LOG':     await handleSleep(bot, msg);      break;
       case 'WEIGHT_LOG':    await handleBody(bot, msg);        break;
@@ -242,12 +245,6 @@ function startBot() {
         await handleCoachReply(bot, msg, repState.last_coach_message_id);
         return;
       }
-    }
-
-    // ── Workout details follow-up ─────────────────────────────────────────────
-    if (msg.text && hasPendingWorkout(chatId)) {
-      const handled = await handleWorkoutDetails(bot, chatId, msg.text);
-      if (handled) return;
     }
 
     // ── Classify early — used for wake/bed detection before state routing ─────
@@ -396,6 +393,37 @@ function startBot() {
           if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart });
         } else {
           await handlePhotoQuestion(bot, state.originalMsg, state.photos[0]);
+        }
+        return;
+      }
+
+      if (state.type === 'workout_confirm') {
+        const text = msg.text || '';
+        if (isCancellation(text)) {
+          pendingStates.delete(chatId);
+          await bot.sendMessage(chatId, '❌ Cancelled.');
+          return;
+        }
+        const isCorrectionIntent = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i))
+          || /\b(lesson|break|rest|actually|more like|not|wrong|instead|change|edit|fix)\b/i.test(text);
+        if (!isCorrectionIntent) {
+          pendingStates.delete(chatId);
+          await logWorkout(bot, chatId, state.workoutData);
+          if (state.catchupRetro) {
+            await bot.sendMessage(chatId, 'anything else? (or done)');
+            pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+          }
+          return;
+        }
+        // Apply correction and show revised preview
+        pendingStates.delete(chatId);
+        await bot.sendChatAction(chatId, 'typing');
+        try {
+          const updated = await claude.applyWorkoutCorrection(state.workoutData, text);
+          await bot.sendMessage(chatId, formatWorkoutPreview(updated));
+          pendingStates.set(chatId, { type: 'workout_confirm', workoutData: updated, catchupRetro: state.catchupRetro });
+        } catch {
+          await bot.sendMessage(chatId, '❌ Could not apply correction.');
         }
         return;
       }

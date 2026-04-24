@@ -1,76 +1,49 @@
-const claude  = require('../claude');
-const notion  = require('../notion');
+const claude = require('../claude');
+const notion = require('../notion');
 
-// pendingWorkouts: chatId -> { pageId, workoutName }
-const pendingWorkouts = new Map();
-
-function formatWorkoutConfirm(data) {
+function formatWorkoutPreview(data) {
   const dur = data.duration_min ? `${data.duration_min} min` : null;
-  const cal = data.calories_burned ? `~${data.calories_burned} kcal` : null;
-  const header = [data.workout_name, dur, cal].filter(Boolean).join(' — ');
-  const exStr = (data.exercises || []).slice(0, 4).map(e => {
-    let s = e.name;
+  const cal = data.calories_burned ? `~${data.calories_burned} kcal burned` : null;
+  const retro = data.date ? ` (${data.date})` : '';
+  const header = `💪 ${[data.workout_name + retro, dur, cal].filter(Boolean).join(' — ')}`;
+  const exLines = (data.exercises || []).slice(0, 6).map(e => {
+    let s = `  ${e.name}`;
     if (e.sets && e.reps) s += ` ${e.sets}×${e.reps}`;
-    if (e.weight_kg) s += `@${e.weight_kg}kg`;
+    if (e.weight_kg) s += ` @${e.weight_kg}kg`;
     return s;
-  }).join(', ');
-  return { header, exStr };
+  });
+  const lines = [header, ...(exLines.length ? exLines : (data.exercises_summary ? [`  ${data.exercises_summary}`] : []))];
+  lines.push('');
+  lines.push('ok to log, or tell me what to fix');
+  return lines.join('\n');
 }
 
-async function handleWorkout(bot, msg) {
+async function showWorkoutPreview(bot, msg) {
   const chatId = msg.chat.id;
   await bot.sendChatAction(chatId, 'typing');
   try {
     const data = await claude.parseWorkout(msg.text || msg.caption || '');
     if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
-    const page = await notion.createWorkoutEntry(data);
-    const { header, exStr } = formatWorkoutConfirm(data);
-
-    const isSparse = !data.duration_min && (!data.exercises || data.exercises.length === 0);
-
-    const retro = msg._retroDate?.dateStr ? ` (${msg._retroDate.dateStr})` : '';
-    if (isSparse) {
-      pendingWorkouts.set(chatId, { pageId: page?.id, workoutName: data.workout_name });
-      await bot.sendMessage(chatId, `✅ ${header}${retro} logged.\n${exStr || ''}\nHow long and what exercises? (or skip)`);
-    } else {
-      pendingWorkouts.delete(chatId);
-      await bot.sendMessage(chatId, `✅ ${header}${retro}\n${exStr || data.exercises_summary || ''}`);
-    }
+    await bot.sendMessage(chatId, formatWorkoutPreview(data));
+    return data;
   } catch (err) {
-    console.error('Workout error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to log workout. Try again.');
+    console.error('Workout preview error:', err.message);
+    await bot.sendMessage(chatId, '❌ Failed to parse workout. Try again.');
+    return null;
   }
 }
 
-async function handleWorkoutDetails(bot, chatId, text) {
-  const pending = pendingWorkouts.get(chatId);
-  if (!pending) return false;
-
-  const skip = /^(skip|no|nah|done|nothing|nope)$/i.test(text.trim());
-  if (skip) {
-    pendingWorkouts.delete(chatId);
-    return true;
-  }
-
+async function logWorkout(bot, chatId, data) {
   try {
-    // Re-parse details from follow-up message
-    const data = await claude.parseWorkout(`${pending.workoutName}: ${text}`);
-    if (pending.pageId) {
-      await notion.updateWorkoutEntry(pending.pageId, data);
-    }
-    pendingWorkouts.delete(chatId);
-    const { header, exStr } = formatWorkoutConfirm(data);
-    await bot.sendMessage(chatId, `✅ updated: ${header}\n${exStr || data.exercises_summary || ''}`);
-    return true;
+    await notion.createWorkoutEntry(data);
+    const dur = data.duration_min ? `${data.duration_min} min` : null;
+    const cal = data.calories_burned ? `~${data.calories_burned} kcal` : null;
+    const retro = data.date ? ` (${data.date})` : '';
+    await bot.sendMessage(chatId, `✅ ${[data.workout_name + retro, dur, cal].filter(Boolean).join(' — ')}`);
   } catch (err) {
-    console.error('Workout details error:', err.message);
-    pendingWorkouts.delete(chatId);
-    return true;
+    console.error('Workout log error:', err.message);
+    await bot.sendMessage(chatId, '❌ Failed to write to Notion. Try again.');
   }
 }
 
-function hasPendingWorkout(chatId) {
-  return pendingWorkouts.has(chatId);
-}
-
-module.exports = { handleWorkout, handleWorkoutDetails, hasPendingWorkout };
+module.exports = { showWorkoutPreview, logWorkout, formatWorkoutPreview };

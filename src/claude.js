@@ -183,6 +183,18 @@ async function parseWorkout(text) {
   return parsed;
 }
 
+async function applyWorkoutCorrection(existingData, correction) {
+  const prompt = `Current workout data:\n${JSON.stringify(existingData, null, 2)}\n\nUser correction: "${correction}"\n\nApply the correction. Only change what was mentioned. Recalculate calories_burned if intensity/duration changed. Return the complete updated JSON with same structure.`;
+  const response = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 512,
+    system: 'You are a workout data editor. Apply corrections to workout JSON. Return only valid JSON with same structure.',
+    messages: [{ role: 'user', content: prompt }],
+  });
+  const parsed = parseJSON(response.content[0].text);
+  if (!parsed) throw new Error('Could not parse correction response');
+  return parsed;
+}
+
 // ── Recovery parsing ──────────────────────────────────────────────────────────
 
 const RECOVERY_SYSTEM = `Parse a sauna or cold plunge session from the message. The message may contain other logs — extract ONLY the recovery session. Type must be exactly "Sauna" or "Cold Plunge".
@@ -508,7 +520,7 @@ async function analyzeGolfPhoto(photoBase64, caption) {
 module.exports = {
   classify,
   analyzeMeal, applyMealCorrection,
-  parseWorkout, parseRecovery, parseSleep, parseBody,
+  parseWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseBody,
   parsePlans, parseTimeCorrection, parseCorrection,
   askCoach, askWithPhoto, continueCoachReply,
   generateDaySummary, generateEveningCheck, generateWeeklyReview,
