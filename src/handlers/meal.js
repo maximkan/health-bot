@@ -27,11 +27,12 @@ function formatConfirmation(data, totals, targets) {
   const prot = Math.round(totals?.protein  ?? 0);
   const calLeft  = T.calories - cal;
 
+  const retroLabel = data.date ? ` (${data.date})` : '';
   const lines = [
-    `✅ ${data.meal_name} — ${Math.round(data.totals.calories)} kcal · ${Math.round(data.totals.protein)}g P`,
+    `✅ ${data.meal_name}${retroLabel} — ${Math.round(data.totals.calories)} kcal · ${Math.round(data.totals.protein)}g P`,
   ];
   if ((data.caffeine_mg ?? 0) > 0) lines[0] += ` · ☕ ${data.caffeine_mg}mg`;
-  if (totals) {
+  if (totals && !data.date) {
     lines.push(`📊 today: ${cal} / ${T.calories} kcal · ${prot} / ${T.protein}g P`);
     if (calLeft > 0)  lines.push(`${calLeft} kcal left 💪`);
     else              lines.push(`⚠️ ${Math.abs(calLeft)} kcal over target`);
@@ -73,8 +74,8 @@ async function showMealPreview(bot, msg, photos) {
 
 async function logMeal(bot, chatId, data, dayStart) {
   try {
-    // Drop any meal time that's in the future — can't log what hasn't happened yet
-    if (data.time) {
+    // Drop future times only when not retroactively logging
+    if (data.time && !data.date) {
       const { getMalaysiaDateStr } = require('../utils/time');
       const [h, m] = data.time.split(':').map(Number);
       const mealMs = new Date(`${getMalaysiaDateStr()}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`).getTime();

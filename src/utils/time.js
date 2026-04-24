@@ -118,8 +118,34 @@ function extractTimeMs(text) {
   return null;
 }
 
+// Detect relative date references. Returns { dateStr, dayStartMs } or null.
+function detectRetroDate(text) {
+  if (!text) return null;
+  const lc = text.toLowerCase();
+
+  const isYesterday = /\b(yesterday|last night|yesterday night|yesterday evening|yesterday morning)\b/.test(lc);
+  if (isYesterday) {
+    const d = getMalaysiaDate();
+    const past = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - 1));
+    const dateStr = past.toISOString().split('T')[0];
+    return { dateStr, dayStartMs: past.getTime() - OFFSET_MS };
+  }
+
+  const daysAgo = lc.match(/\b([2-7])\s+days?\s+ago\b/);
+  if (daysAgo) {
+    const n = parseInt(daysAgo[1]);
+    const d = getMalaysiaDate();
+    const past = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - n));
+    const dateStr = past.toISOString().split('T')[0];
+    return { dateStr, dayStartMs: past.getTime() - OFFSET_MS };
+  }
+
+  return null;
+}
+
 module.exports = {
   getMalaysiaISO, getMalaysiaDateStr, getMalaysiaHour, getDayOfWeek, getTodayRange,
   tsToISO, tsToTimeStr, buildTimeISO, buildDateTimeISO,
   getTomorrowAt, getDateAt, getTodayStr, getTomorrowStr, getActivityTomorrowStr, nowContext, extractTimeMs,
+  detectRetroDate,
 };

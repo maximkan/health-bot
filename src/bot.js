@@ -15,7 +15,7 @@ const { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans } = require(
 const { handleWorkoutDetails, hasPendingWorkout } = require('./handlers/workout');
 const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
-const { buildTimeISO, nowContext, getMalaysiaDateStr, extractTimeMs } = require('./utils/time');
+const { buildTimeISO, nowContext, getMalaysiaDateStr, extractTimeMs, detectRetroDate } = require('./utils/time');
 
 const CONFIRM_WORDS = ['ok','okay','yes','log','log it','✅','yep','yup','looks good','good','sure','go'];
 const CANCEL_WORDS  = ['cancel','no','nope','skip','stop','abort'];
@@ -47,6 +47,16 @@ async function downloadPhoto(bot, msg) {
   const link = await bot.getFileLink(largest.file_id);
   const res = await fetch(link);
   return Buffer.from(await res.arrayBuffer()).toString('base64');
+}
+
+async function maybeTriggerCatchup(bot, chatId, wakeData) {
+  if (!wakeData?.prevDayStart) return;
+  const { getMalaysiaDate } = require('./utils/time');
+  const OFFSET_MS = 8 * 60 * 60 * 1000;
+  const prevDate = new Date(wakeData.prevDayStart + OFFSET_MS);
+  const retroDate = prevDate.toISOString().split('T')[0];
+  await bot.sendMessage(chatId, 'anything to catch up from yesterday?');
+  pendingStates.set(chatId, { type: 'catchup_log', retroDate, dayStartMs: wakeData.prevDayStart });
 }
 
 // ── Intent dispatcher ─────────────────────────────────────────────────────────
@@ -91,11 +101,12 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
   }
 
   if (hasMeal) {
+    const retroDate = msg._retroDate;
     const data = await showMealPreview(bot, msg, null);
     if (!data) {
-      pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: msg.text, dayStart: userState?.current_day_start });
+      pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: msg.text, dayStart: retroDate?.dayStartMs ?? userState?.current_day_start, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
     } else {
-      pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: userState?.current_day_start });
+      pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: retroDate?.dayStartMs ?? userState?.current_day_start, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
     }
   }
 }
@@ -170,6 +181,10 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
   // ── Classify + dispatch ───────────────────────────────────────────────────
   const intents = preIntents?.length ? preIntents : await claude.classify(msg.text);
   db.logMessage(chatId, msg.text, intents.join(','), msg.message_id);
+  if (!msg._retroDate) {
+    const retro = detectRetroDate(msg.text);
+    if (retro) msg._retroDate = retro;
+  }
   await dispatchIntents(bot, msg, chatId, userState, intents);
 }
 
@@ -298,6 +313,8 @@ function startBot() {
         const hasLogs = state.pendingIntents?.some(i => LOG_TYPES.includes(i));
         if (state.pendingMsg && hasLogs) {
           await routeMessage(bot, state.pendingMsg, chatId, db.getState(chatId), state.pendingIntents);
+        } else {
+          await maybeTriggerCatchup(bot, chatId, state.wakeData);
         }
         return;
       }
@@ -320,6 +337,8 @@ function startBot() {
         const hasLogs = state.pendingIntents?.some(i => LOG_TYPES.includes(i));
         if (state.pendingMsg && hasLogs) {
           await routeMessage(bot, state.pendingMsg, chatId, db.getState(chatId), state.pendingIntents);
+        } else {
+          await maybeTriggerCatchup(bot, chatId, wakeData);
         }
         return;
       }
@@ -352,7 +371,7 @@ function startBot() {
         pendingStates.delete(chatId);
         const fakeMsg = { ...msg, text: `${state.originalText}. ${msg.text || ''}`, caption: undefined };
         const data = await showMealPreview(bot, fakeMsg, null);
-        if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart });
+        if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
         return;
       }
 
@@ -361,19 +380,54 @@ function startBot() {
         if (isCancellation(text)) {
           pendingStates.delete(chatId);
           await bot.sendMessage(chatId, '❌ Cancelled. Nothing logged.');
+          if (state.catchupRetro) {
+            await bot.sendMessage(chatId, 'anything else? (or done)');
+            pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+          }
           return;
         }
+        const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
         if (isConfirmation(text)) {
           pendingStates.delete(chatId);
-          await logMeal(bot, chatId, state.mealData, state.dayStart);
+          await logMeal(bot, chatId, mealData, state.dayStart);
+          if (state.catchupRetro) {
+            await bot.sendMessage(chatId, 'anything else? (or done)');
+            pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+          }
           return;
         }
         // Inline correction
         pendingStates.delete(chatId);
-        const updated = await applyCorrection(bot, chatId, state.mealData, text);
+        const updated = await applyCorrection(bot, chatId, mealData, text);
         if (!updated) return;
         await bot.sendMessage(chatId, formatPreview(updated).replace('Reply "ok" to log, or tell me what to fix.', 'Updated. Logging...'));
         await logMeal(bot, chatId, updated, state.dayStart);
+        if (state.catchupRetro) {
+          await bot.sendMessage(chatId, 'anything else? (or done)');
+          pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+        }
+        return;
+      }
+
+      if (state.type === 'catchup_log') {
+        const isDone = /^(no|nah|nope|skip|none|done|nothing|all good|that'?s?\s*(it|all))$/i.test((msg.text||'').trim());
+        if (isDone) {
+          pendingStates.delete(chatId);
+          return;
+        }
+        const catchupRetro = { retroDate: state.retroDate, dayStartMs: state.dayStartMs };
+        const fakeMsg = { ...msg, _retroDate: { dateStr: state.retroDate, dayStartMs: state.dayStartMs }, _catchupRetro: catchupRetro };
+        pendingStates.delete(chatId);
+        await routeMessage(bot, fakeMsg, chatId, db.getState(chatId), earlyIntents);
+        // If routeMessage set a meal_confirm state, inject catchupRetro into it
+        const curState = pendingStates.get(chatId);
+        if (curState?.type === 'meal_confirm' || curState?.type === 'meal_text_clarification') {
+          pendingStates.set(chatId, { ...curState, catchupRetro });
+        } else if (!pendingStates.has(chatId)) {
+          // Immediate log (workout/recovery/sleep), ask for more
+          await bot.sendMessage(chatId, 'anything else? (or done)');
+          pendingStates.set(chatId, { type: 'catchup_log', ...catchupRetro });
+        }
         return;
       }
 

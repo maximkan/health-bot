@@ -32,7 +32,7 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
 
   const sleepLine = sleepStr ? `${sleepStr} sleep. ` : '';
   await bot.sendMessage(chatId, `☀️ morning. ${sleepLine}quality? (1-5)`);
-  return { sleepH, sleepStr, bedMs: bedMs ?? (wakeMs - 8 * 3600 * 1000), prevTotals, newDayStart: wakeMs, hasBed };
+  return { sleepH, sleepStr, bedMs: bedMs ?? (wakeMs - 8 * 3600 * 1000), prevTotals, newDayStart: wakeMs, hasBed, prevDayStart: state.current_day_start };
 }
 
 async function processQuality(bot, chatId, quality, wakeData) {

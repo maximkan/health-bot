@@ -10,8 +10,10 @@ async function handleRecovery(bot, msg) {
       await bot.sendMessage(chatId, 'What was the temperature? (e.g. "85°C" for sauna, "14°C" for cold plunge)');
       return;
     }
+    if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
     await notion.createRecoveryEntry(data);
-    await bot.sendMessage(chatId, `✅ ${data.type} — ${data.duration_min} min @ ${data.temperature_c}°C`);
+    const retro = msg._retroDate?.dateStr ? ` (${msg._retroDate.dateStr})` : '';
+    await bot.sendMessage(chatId, `✅ ${data.type} — ${data.duration_min} min @ ${data.temperature_c}°C${retro}`);
   } catch (err) {
     console.error('Recovery error:', err.message);
     await bot.sendMessage(chatId, '❌ Failed to log. Try: "sauna 15min 85°C"');

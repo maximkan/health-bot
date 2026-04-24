@@ -22,17 +22,19 @@ async function handleWorkout(bot, msg) {
   await bot.sendChatAction(chatId, 'typing');
   try {
     const data = await claude.parseWorkout(msg.text || msg.caption || '');
+    if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
     const page = await notion.createWorkoutEntry(data);
     const { header, exStr } = formatWorkoutConfirm(data);
 
     const isSparse = !data.duration_min && (!data.exercises || data.exercises.length === 0);
 
+    const retro = msg._retroDate?.dateStr ? ` (${msg._retroDate.dateStr})` : '';
     if (isSparse) {
       pendingWorkouts.set(chatId, { pageId: page?.id, workoutName: data.workout_name });
-      await bot.sendMessage(chatId, `✅ ${header} logged.\n${exStr || ''}\nHow long and what exercises? (or skip)`);
+      await bot.sendMessage(chatId, `✅ ${header}${retro} logged.\n${exStr || ''}\nHow long and what exercises? (or skip)`);
     } else {
       pendingWorkouts.delete(chatId);
-      await bot.sendMessage(chatId, `✅ ${header}\n${exStr || data.exercises_summary || ''}`);
+      await bot.sendMessage(chatId, `✅ ${header}${retro}\n${exStr || data.exercises_summary || ''}`);
     }
   } catch (err) {
     console.error('Workout error:', err.message);

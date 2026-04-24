@@ -97,7 +97,9 @@ function dayRangeFilter(dayStartMs) {
 
 async function createMealEntry(data) {
   const { meal_name, meal_type, items = [], totals, notes = '', time, caffeine_mg = 0 } = data;
-  const dateISO     = time ? buildTimeISO(time) : getMalaysiaISO();
+  const dateISO = data.date
+    ? buildDateTimeISO(data.date, time || null)
+    : (time ? buildTimeISO(time) : getMalaysiaISO());
   const itemsSummary = items.map(i => i.weight_g ? `${i.name} ${i.weight_g}g` : i.name).join(', ');
 
   const children = [
@@ -151,7 +153,7 @@ async function createWorkoutEntry(data) {
     parent: { database_id: config.notion.db.workoutLog },
     properties: {
       Workout:          { title: rt(workout_name) },
-      Date:             { date: { start: getMalaysiaISO() } },
+      Date:             { date: { start: data.date ? buildDateTimeISO(data.date, null) : getMalaysiaISO() } },
       'Activity Type':  { rich_text: rt(activity_type) },
       'Duration (min)': { number: duration_min },
       'Calories Burned':{ number: calories_burned },
@@ -194,7 +196,7 @@ async function createRecoveryEntry(data) {
   ];
   const props = {
     Session:          { title: rt(sessionName) },
-    Date:             { date: { start: getMalaysiaISO() } },
+    Date:             { date: { start: data.date ? buildDateTimeISO(data.date, null) : getMalaysiaISO() } },
     Type:             { select: { name: type } },
     'Duration (min)': { number: duration_min },
     Notes:            { rich_text: rt(notes) },
