@@ -80,11 +80,12 @@ ACCURACY RULES:
 
 KNOWN FOODS RULES (when a Known Foods section is provided):
 - Known Foods are measured ground truth — always use those exact calorie/macro values
-- For photos: visually identify each item, match to the closest Known Foods entry, use those macros exactly
-- Only estimate portion size as a fraction of the standard serving if a portion looks clearly smaller/larger
-- If you see an item in the photo that looks like a DIFFERENT food from what's listed in Known Foods (e.g., rice on the plate but Known Foods shows pasta), set confidence="low" and clarification="I see [what you see] but today's menu shows [known foods entry] — did they swap it? Tell me what to use."
-- If an item appears with NO match in Known Foods at all, set new_food=true, confidence="low", clarification="[item] isn't in the database — what should I use?"
-- Never invent macros for items that are in Known Foods — match and use, don't re-estimate
+- For photos showing a multi-component plate (buffet/cafeteria style with rice, protein, vegetables, sides): this is almost certainly an NS (Network School) cafeteria dinner — treat it as such
+- Match each visible item to the closest Known Foods entry; use those macros exactly; only adjust for portion size relative to standard serving
+- If you see an item that looks like a DIFFERENT food from what's in Known Foods (e.g., rice on plate but Known Foods shows pasta): set confidence="low", clarification="I see [what you see] on the plate but today's menu shows [known foods entry] — did they swap it? Tell me what to use."
+- If an item has no match at all in Known Foods: set new_food=true, confidence="low", clarification="[item] isn't in today's database — what should I use for macros?"
+- If the photo could plausibly NOT be NS (restaurant plating, single dish, home-cooked style): set confidence="low", clarification="Is this an NS dinner? (yes/no)"
+- Never invent macros for items that exist in Known Foods — match and use, don't re-estimate
 
 Parse time from the message if present ("had lunch at 12:30" → time = "12:30").
 

@@ -130,6 +130,7 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
         if (isPhotoQuestion(cap)) { await handlePhotoQuestion(bot, group.firstMsg, group.photos[0]); return; }
         const data = await showMealPreview(bot, group.firstMsg, group.photos);
         if (data) pendingStates.set(group.chatId, { type: 'meal_confirm', mealData: data, dayStart: group.dayStart });
+        else pendingStates.set(group.chatId, { type: 'meal_photo_clarification', caption: group.firstMsg.caption || '', photo: group.photos[0], dayStart: group.dayStart });
       }, 1500);
       return;
     }
@@ -144,8 +145,10 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
       await bot.sendMessage(chatId, 'Log this as a meal, or are you asking a question? Reply "log" or "question".');
       return;
     }
-    const data = await showMealPreview(bot, msg, await downloadPhoto(bot, msg));
+    const photo = await downloadPhoto(bot, msg);
+    const data = await showMealPreview(bot, msg, photo);
     if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart });
+    else pendingStates.set(chatId, { type: 'meal_photo_clarification', caption: msg.caption || '', photo, dayStart });
     return;
   }
 
@@ -367,6 +370,15 @@ function startBot() {
         return;
       }
 
+      if (state.type === 'meal_photo_clarification') {
+        pendingStates.delete(chatId);
+        const fakeMsg = { ...msg, caption: `${state.caption}. ${msg.text || ''}`, text: undefined };
+        const data = await showMealPreview(bot, fakeMsg, state.photo);
+        if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart });
+        else pendingStates.set(chatId, { type: 'meal_photo_clarification', caption: fakeMsg.caption, photo: state.photo, dayStart: state.dayStart });
+        return;
+      }
+
       if (state.type === 'meal_text_clarification') {
         pendingStates.delete(chatId);
         const fakeMsg = { ...msg, text: `${state.originalText}. ${msg.text || ''}`, caption: undefined };
@@ -404,16 +416,12 @@ function startBot() {
           return;
         }
 
-        // Inline correction
+        // Inline correction — show revised preview, loop back
         pendingStates.delete(chatId);
         const updated = await applyCorrection(bot, chatId, mealData, text);
         if (!updated) return;
-        await bot.sendMessage(chatId, formatPreview(updated).replace('ok to log, or tell me what to fix', 'Updated. Logging...'));
-        await logMeal(bot, chatId, updated, state.dayStart);
-        if (state.catchupRetro) {
-          await bot.sendMessage(chatId, 'anything else? (or done)');
-          pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
-        }
+        await bot.sendMessage(chatId, formatPreview(updated));
+        pendingStates.set(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
         return;
       }
 
