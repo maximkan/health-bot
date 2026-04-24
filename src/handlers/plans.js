@@ -76,26 +76,32 @@ async function handlePlan(bot, msg) {
 }
 
 function scheduleTimedPlanReminders(chatId, planId, plan) {
-  const { getDateAt, getTodayStr } = require('../utils/time');
-  const [h, m] = plan.time.split(':').map(Number);
+  const { getDateAt } = require('../utils/time');
+  const [h, m] = (plan.time || '00:00').split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return;
   const eventMs = getDateAt(plan.date, h, m);
 
-  // 30 min before
-  const reminderMs = eventMs - 30 * 60 * 1000;
-  if (reminderMs > Date.now()) {
-    cronSvc.scheduleOnce(chatId, reminderMs, () =>
-      cronSvc.getBotRef()?.sendMessage(chatId, `${plan.title} in 30 min`).catch(() => {})
-    );
+  function persist(fireMs, text, fn) {
+    if (fireMs <= Date.now()) return;
+    const remId = db.saveReminder(chatId, fireMs, text);
+    cronSvc.scheduleOnce(chatId, fireMs, async () => {
+      db.markReminderFired(remId);
+      await fn();
+    });
   }
 
-  // 1 hour after to check if done
+  // 30 min before
+  persist(eventMs - 30 * 60 * 1000, `${plan.title} in 30 min`, () =>
+    cronSvc.getBotRef()?.sendMessage(chatId, `${plan.title} in 30 min`).catch(() => {})
+  );
+
+  // 1 hour after — check if done (not persisted, ephemeral nudge)
   const checkMs = eventMs + 60 * 60 * 1000;
   if (checkMs > Date.now()) {
     cronSvc.scheduleOnce(chatId, checkMs, async () => {
       const dbPlan = db.getAllPending(chatId).find(p => p.id === planId);
       if (dbPlan && dbPlan.status !== 'done') {
         try { await cronSvc.getBotRef()?.sendMessage(chatId, `did you do ${plan.title}?`); } catch {}
-        // Auto-skip after 2 more hours with no reply
         cronSvc.scheduleOnce(chatId, Date.now() + 2 * 3600 * 1000, () => {
           db.updatePlanStatus(planId, 'skipped');
         });
@@ -104,16 +110,11 @@ function scheduleTimedPlanReminders(chatId, planId, plan) {
   }
 
   // Night before at 9 PM
-  const { getDateAt: gda } = require('../utils/time');
   const [yr, mo, dy] = plan.date.split('-').map(Number);
-  const prevDay = new Date(Date.UTC(yr, mo - 1, dy - 1));
-  const prevDayStr = prevDay.toISOString().split('T')[0];
-  const nightBeforeMs = gda(prevDayStr, 21, 0);
-  if (nightBeforeMs > Date.now()) {
-    cronSvc.scheduleOnce(chatId, nightBeforeMs, () =>
-      cronSvc.getBotRef()?.sendMessage(chatId, `tomorrow: ${plan.title} at ${plan.time}`).catch(() => {})
-    );
-  }
+  const prevDayStr = new Date(Date.UTC(yr, mo - 1, dy - 1)).toISOString().split('T')[0];
+  persist(getDateAt(prevDayStr, 21, 0), `tomorrow: ${plan.title} at ${plan.time}`, () =>
+    cronSvc.getBotRef()?.sendMessage(chatId, `tomorrow: ${plan.title} at ${plan.time}`).catch(() => {})
+  );
 }
 
 async function handlePlanDone(bot, msg) {
