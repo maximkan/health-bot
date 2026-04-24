@@ -235,7 +235,8 @@ function startBot() {
   cronSvc.init(bot);
 
   bot.on('message', async (msg) => {
-    const chatId    = msg.chat.id;
+    const chatId = msg.chat.id;
+    try {
     const userState = db.getState(chatId);
 
     // ── COACH_REPLY: user swiped-replied to a coach message ──────────────────
@@ -508,6 +509,10 @@ function startBot() {
     }
 
     await routeMessage(bot, msg, chatId, userState, earlyIntents);
+    } catch (err) {
+      console.error('Unhandled message error:', err.message, err.stack);
+      try { await bot.sendMessage(chatId, '❌ Something went wrong. Try again.'); } catch {}
+    }
   });
 
   bot.on('polling_error', (err) => console.error('Polling error:', err.code, err.message));

@@ -25,20 +25,36 @@ function tsToTimeStr(ms) {
   return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
 }
 
-// "14:00" → ISO for today at that time in MYT
+// Parse a time string in any reasonable format → { h, m } or null
+function parseHM(timeStr) {
+  if (!timeStr) return null;
+  const s = String(timeStr).trim();
+  if (s.includes(':')) {
+    const [h, m] = s.split(':').map(Number);
+    if (!isNaN(h) && !isNaN(m)) return { h, m };
+  }
+  const n = parseInt(s);
+  if (!isNaN(n) && n >= 0 && n <= 23) return { h: n, m: 0 };
+  return null;
+}
+
+// "14:00" or "14" → ISO for today at that time in MYT
 function buildTimeISO(timeStr) {
-  const [h, m] = timeStr.split(':').map(Number);
+  const hm = parseHM(timeStr);
   const d = getMalaysiaDate();
   const yr = d.getUTCFullYear();
   const mo = String(d.getUTCMonth() + 1).padStart(2,'0');
   const dy = String(d.getUTCDate()).padStart(2,'0');
+  const h = hm ? hm.h : d.getUTCHours();
+  const m = hm ? hm.m : d.getUTCMinutes();
   return `${yr}-${mo}-${dy}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`;
 }
 
-// Build ISO for a specific YYYY-MM-DD date + "HH:MM" time in MYT
+// Build ISO for a specific YYYY-MM-DD date + time string in MYT
 function buildDateTimeISO(dateStr, timeStr) {
-  if (!timeStr) return `${dateStr}T09:00:00+08:00`;
-  const [h, m] = timeStr.split(':').map(Number);
+  const hm = parseHM(timeStr);
+  const h = hm ? hm.h : 9;
+  const m = hm ? hm.m : 0;
   return `${dateStr}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`;
 }
 
