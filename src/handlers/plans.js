@@ -203,9 +203,27 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
   }
 }
 
+async function syncNotionPlansToDb(chatId, dateStr) {
+  const notionPlans = await notion.getPlansForDate(dateStr).catch(() => []);
+  for (const np of notionPlans) {
+    if (np.notion_page_id && db.getPlanByNotionId(np.notion_page_id)) continue;
+    if (db.getPlanByTitleDate(chatId, np.title, dateStr)) continue;
+    const planId = db.savePlan(chatId, { text: np.title, date: dateStr, time: np.time || null, recurring: 'one-time', guests: [], location: null });
+    db.setPlanNotionId(planId, np.notion_page_id);
+    if (np.time) {
+      scheduleTimedPlanReminders(chatId, planId, { title: np.title, date: dateStr, time: np.time });
+      try {
+        const ev = await gcal.createEvent({ title: np.title, date: dateStr, time: np.time, guests: [] });
+        db.setPlanCalendar(planId);
+        if (ev?.id) db.setPlanGCalId(planId, ev.id);
+      } catch (err) { console.error('Notion→GCal sync error:', err.message); }
+    }
+  }
+}
+
 async function handleAskFallback(bot, msg) {
   const { handleAsk } = require('./ask');
   await handleAsk(bot, msg);
 }
 
-module.exports = { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans, scheduleTimedPlanReminders };
+module.exports = { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans, scheduleTimedPlanReminders, syncNotionPlansToDb };

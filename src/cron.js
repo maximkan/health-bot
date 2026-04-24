@@ -159,7 +159,8 @@ async function runUntimedReminders() {
 // ── GCal mid-day sync ─────────────────────────────────────────────────────────
 
 async function runGCalSync() {
-  const gcal  = require('./gcal');
+  const gcal   = require('./gcal');
+  const notion = require('./notion');
   const { scheduleTimedPlanReminders } = require('./handlers/plans');
   const { getDateAt } = require('./utils/time');
   const todayStr = getMalaysiaDateStr();
@@ -181,12 +182,17 @@ async function runGCalSync() {
         const reminderMs = eventMs - 30 * 60 * 1000;
 
         if (reminderMs > Date.now()) {
-          // Normal: reminder window still in future
           scheduleTimedPlanReminders(chatId, planId, { title: event.title, date: todayStr, time: event.time });
         } else if (minsUntil > 0 && minsUntil <= 60) {
-          // Reminder window just passed but event still upcoming — fire immediately
           _bot?.sendMessage(chatId, `heads up: ${event.title} at ${event.time} (in ${Math.round(minsUntil)} min)`).catch(() => {});
         }
+
+        // Write to Notion if not already there
+        try {
+          const notionPage = await notion.createPlanEntry({ title: event.title, date: todayStr, time: event.time });
+          if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
+        } catch (err) { console.error('GCal→Notion sync error:', err.message); }
+
         console.log(`GCal sync: picked up "${event.title}" at ${event.time}`);
       }
     } catch (e) {

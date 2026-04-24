@@ -302,6 +302,25 @@ async function createPlanEntry(plan) {
   }));
 }
 
+async function getPlansForDate(dateStr) {
+  if (!config.notion.db.plans) return [];
+  const res = await notion.databases.query({
+    database_id: config.notion.db.plans,
+    filter: {
+      and: [
+        { property: 'Date', date: { on_or_after: `${dateStr}T00:00:00+08:00` } },
+        { property: 'Date', date: { before:       `${dateStr}T23:59:59+08:00` } },
+        { property: 'Status', select: { equals: 'Pending' } },
+      ],
+    },
+  }).catch(() => ({ results: [] }));
+  return (res.results || []).map(p => ({
+    title:          p.properties.Plan?.title?.[0]?.plain_text || '',
+    time:           p.properties.Time?.rich_text?.[0]?.plain_text || null,
+    notion_page_id: p.id,
+  })).filter(p => p.title);
+}
+
 async function updatePlanStatusNotion(pageId, status) {
   if (!pageId) return;
   return enqueue(() => notion.pages.update({
@@ -638,7 +657,7 @@ async function getAllBodyMeasurements() {
 module.exports = {
   getTargets, getTargetsText,
   createMealEntry, createWorkoutEntry, updateWorkoutEntry, createRecoveryEntry, createSleepEntry, createBodyEntry,
-  createPlanEntry, updatePlanStatusNotion,
+  createPlanEntry, updatePlanStatusNotion, getPlansForDate,
   createGolfEntry, getGolfHistory, getGolfHubContent,
   getDailyMealTotals, getDrinkEntries, getEntriesForDay, getDayData, getTodayEntries,
   deleteEntry, getLastBodyMeasurement, getKnownFoodsContext,

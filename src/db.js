@@ -91,6 +91,8 @@ const stmts = {
   markPlanReminded: db.prepare("UPDATE plans SET status='reminded',last_reminded=datetime('now') WHERE id=?"),
   setPlanNotionId: db.prepare("UPDATE plans SET notion_page_id=? WHERE id=?"),
   setPlanCalendar: db.prepare("UPDATE plans SET calendar_event_created=1 WHERE id=?"),
+  getPlanByNotionId:  db.prepare("SELECT id FROM plans WHERE notion_page_id=? LIMIT 1"),
+  getPlanByTitleDate: db.prepare("SELECT id FROM plans WHERE chat_id=? AND plan_text=? AND plan_date=? LIMIT 1"),
   getLastPending: db.prepare("SELECT * FROM plans WHERE chat_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1"),
   getAllPending: db.prepare("SELECT * FROM plans WHERE chat_id=? AND status NOT IN ('done','skipped') ORDER BY plan_date,plan_time"),
 
@@ -166,6 +168,8 @@ const markPlanReminded  = (id)           => stmts.markPlanReminded.run(id);
 const setPlanNotionId   = (id, pageId)   => stmts.setPlanNotionId.run(pageId, id);
 const setPlanCalendar   = (id)           => stmts.setPlanCalendar.run(id);
 const setPlanGCalId     = (id, eventId)  => db.prepare('UPDATE plans SET gcal_event_id=? WHERE id=?').run(eventId, id);
+const getPlanByNotionId  = (pageId)            => stmts.getPlanByNotionId.get(pageId);
+const getPlanByTitleDate = (chatId, text, date) => stmts.getPlanByTitleDate.get(chatId, text, date);
 const getLastPending    = (chatId)       => stmts.getLastPending.get(chatId);
 const getAllPending      = (chatId)       => stmts.getAllPending.all(chatId);
 
@@ -235,6 +239,7 @@ function replaceGolfHistory(chatId, messages) {
 module.exports = {
   getState, setState, addCaffeine, resetCaffeine, getAllChatIds,
   savePlan, getPlansByDate, getPendingUntimed, getPendingTimed,
+  getPlanByNotionId, getPlanByTitleDate,
   updatePlanStatus, markPlanReminded, setPlanNotionId, setPlanCalendar, setPlanGCalId,
   getLastPending, getAllPending,
   saveCoachMessage, getReplyChain, countExchanges, clearReplyChain,

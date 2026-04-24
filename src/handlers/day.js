@@ -4,7 +4,7 @@ const gcal    = require('../gcal');
 const db      = require('../db');
 const { getMalaysiaDateStr, tsToTimeStr, nowContext, getTomorrowStr, getTodayStr, getActivityTomorrowStr, extractTimeMs } = require('../utils/time');
 const { stripMarkdown } = require('./ask');
-const { scheduleTimedPlanReminders } = require('./plans');
+const { scheduleTimedPlanReminders, syncNotionPlansToDb } = require('./plans');
 
 // ── Morning wake flow ─────────────────────────────────────────────────────────
 
@@ -57,8 +57,9 @@ async function processQuality(bot, chatId, quality, wakeData) {
     }
   }
 
-  // Show today's plans only (bot + Google Calendar)
+  // Sync today's plans from Notion into DB before displaying
   const todayStr  = getMalaysiaDateStr();
+  await syncNotionPlansToDb(chatId, todayStr).catch(() => {});
   const timedToday = db.getPendingTimed(chatId, todayStr);
   const tasks      = db.getPendingUntimed(chatId);
   const gcalToday  = await gcal.getEventsForDate(todayStr).catch(() => []);
@@ -119,6 +120,7 @@ async function handleBedTime(bot, chatId, state) {
   const tomorrow = state.current_day_start
     ? getActivityTomorrowStr(state.current_day_start)
     : getTomorrowStr();
+  await syncNotionPlansToDb(chatId, tomorrow).catch(() => {});
   const timedTomorrow = db.getPendingTimed(chatId, tomorrow);
   const gcalTomorrow  = await gcal.getEventsForDate(tomorrow).catch(() => []);
   const dbTitles = new Set(timedTomorrow.map(p => p.plan_text.toLowerCase()));
