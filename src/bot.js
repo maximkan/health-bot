@@ -377,6 +377,9 @@ function startBot() {
 
       if (state.type === 'meal_confirm') {
         const text = msg.text || '';
+        const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
+
+        // Cancel only on explicit cancel words
         if (isCancellation(text)) {
           pendingStates.delete(chatId);
           await bot.sendMessage(chatId, '❌ Cancelled. Nothing logged.');
@@ -386,8 +389,12 @@ function startBot() {
           }
           return;
         }
-        const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
-        if (isConfirmation(text)) {
+
+        // Treat as correction only if the message looks like food/correction intent
+        const isCorrectionIntent = earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i));
+
+        if (!isCorrectionIntent) {
+          // Anything else (ok, thanks, nice, sure, 👍, etc.) → just log
           pendingStates.delete(chatId);
           await logMeal(bot, chatId, mealData, state.dayStart);
           if (state.catchupRetro) {
@@ -396,11 +403,12 @@ function startBot() {
           }
           return;
         }
+
         // Inline correction
         pendingStates.delete(chatId);
         const updated = await applyCorrection(bot, chatId, mealData, text);
         if (!updated) return;
-        await bot.sendMessage(chatId, formatPreview(updated).replace('Reply "ok" to log, or tell me what to fix.', 'Updated. Logging...'));
+        await bot.sendMessage(chatId, formatPreview(updated).replace('ok to log, or tell me what to fix', 'Updated. Logging...'));
         await logMeal(bot, chatId, updated, state.dayStart);
         if (state.catchupRetro) {
           await bot.sendMessage(chatId, 'anything else? (or done)');

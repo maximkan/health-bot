@@ -78,7 +78,14 @@ ACCURACY RULES:
 - Soups/broths: mostly water, low calorie unless creamy
 - Do NOT double-count items
 
-Use the Known Foods reference when provided — those are measured values.
+KNOWN FOODS RULES (when a Known Foods section is provided):
+- Known Foods are measured ground truth — always use those exact calorie/macro values
+- For photos: visually identify each item, match to the closest Known Foods entry, use those macros exactly
+- Only estimate portion size as a fraction of the standard serving if a portion looks clearly smaller/larger
+- If you see an item in the photo that looks like a DIFFERENT food from what's listed in Known Foods (e.g., rice on the plate but Known Foods shows pasta), set confidence="low" and clarification="I see [what you see] but today's menu shows [known foods entry] — did they swap it? Tell me what to use."
+- If an item appears with NO match in Known Foods at all, set new_food=true, confidence="low", clarification="[item] isn't in the database — what should I use?"
+- Never invent macros for items that are in Known Foods — match and use, don't re-estimate
+
 Parse time from the message if present ("had lunch at 12:30" → time = "12:30").
 
 Drink type rules: ANY beverage (coffee, tea, shake, smoothie, juice, milo, teh tarik, sirap, bandung, alcohol, water with flavoring) = Drink type, regardless of time.
