@@ -74,16 +74,11 @@ async function showMealPreview(bot, msg, photos) {
 
 async function logMeal(bot, chatId, data, dayStart) {
   try {
-    // Use the day-start date for the entry, not today's calendar date
-    // (handles logging past midnight — still counts towards the active day)
-    if (!data.date && dayStart) {
-      const OFFSET = 8 * 3600 * 1000;
-      data = { ...data, date: new Date(dayStart + OFFSET).toISOString().split('T')[0] };
-    }
     // Drop future times only when not retroactively logging
-    if (data.time && dayStart) {
+    if (data.time && !data.date) {
+      const { getMalaysiaDateStr } = require('../utils/time');
       const [h, m] = data.time.split(':').map(Number);
-      const mealMs = new Date(`${data.date}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`).getTime();
+      const mealMs = new Date(`${getMalaysiaDateStr()}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`).getTime();
       if (mealMs > Date.now()) delete data.time;
     }
     await notion.createMealEntry(data);

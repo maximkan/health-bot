@@ -52,8 +52,9 @@ async function handlePlan(bot, msg) {
       if (plan.time && planDate) {
         let calStatus = '';
         try {
-          await gcal.createEvent({ title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
+          const gcalEvent = await gcal.createEvent({ title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
           db.setPlanCalendar(planId);
+          if (gcalEvent?.id) db.setPlanGCalId(planId, gcalEvent.id);
           calStatus = ' 📅 Added to Google Calendar.';
         } catch (err) {
           console.error('Calendar error:', err.message);
@@ -128,6 +129,7 @@ async function handlePlanSkip(bot, msg) {
     const plan = await claude.matchPlanToModify(msg.text, pending);
     db.updatePlanStatus(plan.id, 'skipped');
     if (plan.notion_page_id) await notion.updatePlanStatusNotion(plan.notion_page_id, 'Cancelled').catch(() => {});
+    if (plan.gcal_event_id) await gcal.deleteEvent(plan.gcal_event_id).catch(() => {});
     await bot.sendMessage(chatId, `Cancelled: ${plan.plan_text}.`);
   } catch (err) {
     console.error('Plan skip error:', err.message);
@@ -162,8 +164,9 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
       if (plan.time) {
         scheduleTimedPlanReminders(chatId, planId, planWithDate);
         try {
-          await gcal.createEvent({ title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
+          const gcalEvent = await gcal.createEvent({ title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
           db.setPlanCalendar(planId);
+          if (gcalEvent?.id) db.setPlanGCalId(planId, gcalEvent.id);
         } catch {}
         lines.push(`${plan.title} @ ${plan.time}`);
       } else {

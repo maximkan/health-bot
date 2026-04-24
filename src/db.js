@@ -56,6 +56,7 @@ addCol('user_state', 'last_coach_context', 'TEXT');
 addCol('user_state', 'bed_nudge_sent', 'INTEGER DEFAULT 0');
 addCol('user_state', 'weekly_waiting_weight', 'INTEGER DEFAULT 0');
 addCol('user_state', 'bed_plans_tomorrow', 'TEXT');
+addCol('plans', 'gcal_event_id', 'TEXT');
 
 const hasNewPlans = db.prepare("SELECT COUNT(*) as c FROM pragma_table_info('plans') WHERE name='plan_date'").get().c > 0;
 if (!hasNewPlans) {
@@ -164,6 +165,7 @@ const updatePlanStatus  = (id, status)   => stmts.updatePlanStatus.run(status, i
 const markPlanReminded  = (id)           => stmts.markPlanReminded.run(id);
 const setPlanNotionId   = (id, pageId)   => stmts.setPlanNotionId.run(pageId, id);
 const setPlanCalendar   = (id)           => stmts.setPlanCalendar.run(id);
+const setPlanGCalId     = (id, eventId)  => db.prepare('UPDATE plans SET gcal_event_id=? WHERE id=?').run(eventId, id);
 const getLastPending    = (chatId)       => stmts.getLastPending.get(chatId);
 const getAllPending      = (chatId)       => stmts.getAllPending.all(chatId);
 
@@ -233,7 +235,7 @@ function replaceGolfHistory(chatId, messages) {
 module.exports = {
   getState, setState, addCaffeine, resetCaffeine, getAllChatIds,
   savePlan, getPlansByDate, getPendingUntimed, getPendingTimed,
-  updatePlanStatus, markPlanReminded, setPlanNotionId, setPlanCalendar,
+  updatePlanStatus, markPlanReminded, setPlanNotionId, setPlanCalendar, setPlanGCalId,
   getLastPending, getAllPending,
   saveCoachMessage, getReplyChain, countExchanges, clearReplyChain,
   logMessage, getRecentMessages, wasRecentlyActive,

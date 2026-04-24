@@ -55,4 +55,8 @@ async function getEventsForDate(dateStr) {
   });
 }
 
-module.exports = { createEvent, getEventsForDate };
+async function deleteEvent(eventId) {
+  await calendar.events.delete({ calendarId: 'primary', eventId });
+}
+
+module.exports = { createEvent, getEventsForDate, deleteEvent };
