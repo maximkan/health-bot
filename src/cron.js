@@ -23,14 +23,6 @@ function init(bot) {
   cron.schedule('*/30 * * * *', runGCalSync,            tz); // every 30 min
 
   rescheduleAll();
-
-  // Fire any bed nudges missed due to restart (00:30–02:00 window)
-  const myt = new Date(Date.now() + 8 * 3600 * 1000);
-  const minOfDay = myt.getUTCHours() * 60 + myt.getUTCMinutes();
-  if (minOfDay >= 30 && minOfDay < 120) {
-    setTimeout(() => runBedNudge(1), 3000);
-  }
-
   console.log('✅ Cron jobs scheduled');
 }
 
