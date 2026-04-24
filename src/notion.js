@@ -206,10 +206,36 @@ async function createRecoveryEntry(data) {
 // ── Sleep Log ─────────────────────────────────────────────────────────────────
 
 async function createSleepEntry(data) {
-  // bed_date: the date of the night (YYYY-MM-DD), used for the title
-  const { bed_time, wake_time, hours_slept, quality, notes = '', bed_date } = data;
-  const nightOf = bed_date || getMalaysiaDateStr();
-  const children = [
+  const { bed_time, wake_time, hours_slept, quality, notes = '', bed_date, type = 'Night' } = data;
+  const isNap = type === 'Nap';
+  const dateLabel = bed_date || getMalaysiaDateStr();
+  const title = isNap ? `Nap ${dateLabel} ${bed_time}` : `Night of ${dateLabel}`;
+
+  // For night sleep: check if entry already exists today and update instead of creating
+  if (!isNap) {
+    const existing = await enqueue(() => notion.databases.query({
+      database_id: config.notion.db.sleepLog,
+      filter: { property: 'Sleep', title: { equals: title } },
+      page_size: 1,
+    }));
+    if (existing.results.length) {
+      const pageId = existing.results[0].id;
+      return enqueue(() => notion.pages.update({
+        page_id: pageId,
+        properties: {
+          'Bed Time':    { rich_text: rt(bed_time) },
+          'Wake Time':   { rich_text: rt(wake_time) },
+          'Hours Slept': { number: hours_slept },
+          Quality:       { select: { name: String(quality) } },
+          Notes:         { rich_text: rt(notes) },
+        },
+      }));
+    }
+  }
+
+  const children = isNap ? [
+    callout(`Nap ${bed_time} → ${wake_time}  ·  ${hours_slept}h`, '😪', 'yellow_background'),
+  ] : [
     callout(`${bed_time} → ${wake_time}  ·  ${hours_slept}h  ·  ${qualityStars(quality)}`, '😴', 'purple_background'),
     para(`Bed:    ${bed_time}`),
     para(`Wake:   ${wake_time}`),
@@ -217,14 +243,15 @@ async function createSleepEntry(data) {
     para(`Quality: ${qualityStars(quality)} (${quality}/5)`),
     ...(notes ? [divider, para(notes)] : []),
   ];
+
   return enqueue(() => notion.pages.create({
     parent: { database_id: config.notion.db.sleepLog },
     properties: {
-      Sleep:         { title: rt(`Night of ${nightOf}`) },
+      Sleep:         { title: rt(title) },
       'Bed Time':    { rich_text: rt(bed_time) },
       'Wake Time':   { rich_text: rt(wake_time) },
       'Hours Slept': { number: hours_slept },
-      Quality:       { select: { name: String(quality) } },
+      ...(quality !== null && quality !== undefined ? { Quality: { select: { name: String(quality) } } } : {}),
       Notes:         { rich_text: rt(notes) },
     },
     children,

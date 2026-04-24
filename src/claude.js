@@ -23,7 +23,7 @@ Intents:
 - DRINK_LOG: logging a drink (coffee, tea, shake, smoothie, milo, teh tarik, juice, energy drink, alcohol)
 - WORKOUT_LOG: logging exercise or training they did
 - RECOVERY_LOG: logging sauna or cold plunge
-- SLEEP_LOG: reporting past sleep ("went to bed at 2am", "slept 6 hours", "woke up at 9", "slept from 1-8am")
+- SLEEP_LOG: reporting past sleep or nap ("went to bed at 2am", "slept 6 hours", "woke up at 9", "slept from 1-8am", "had a nap", "napped from 3-4pm")
 - WEIGHT_LOG: logging body weight or body fat
 - BED: RIGHT NOW going to sleep — present intent only ("gn", "good night", "going to sleep", "heading to bed", "night", "спать", "спокойной ночи")
 - WAKE: waking up, morning, first message, доброе утро
@@ -180,9 +180,17 @@ async function parseRecovery(text) {
 
 // ── Sleep parsing ─────────────────────────────────────────────────────────────
 
-const SLEEP_SYSTEM = `Parse sleep info from the message. The message may contain other logs — extract ONLY the sleep data. Return ONLY JSON:
-{"bed_time": "01:00", "wake_time": "08:30", "hours_slept": 7.5, "quality": 3, "notes": ""}
-If quality not mentioned, default to 3.`;
+const SLEEP_SYSTEM = `Parse sleep info from the message. The message may contain other logs — extract ONLY the sleep data.
+
+type: "Night" for main sleep, "Nap" for naps.
+For naps: bed_time = nap start, wake_time = nap end. hours_slept = duration. quality = null.
+If quality not mentioned for night sleep, default to 3.
+
+Return ONLY JSON:
+{"type": "Night", "bed_time": "01:00", "wake_time": "08:30", "hours_slept": 7.5, "quality": 3, "notes": ""}
+
+Nap example — "nap from 4 to 5pm":
+{"type": "Nap", "bed_time": "16:00", "wake_time": "17:00", "hours_slept": 1.0, "quality": null, "notes": ""}`;
 
 async function parseSleep(text) {
   const response = await anthropic.messages.create({

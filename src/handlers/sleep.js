@@ -7,7 +7,11 @@ async function handleSleep(bot, msg) {
   try {
     const data = await claude.parseSleep(msg.text || msg.caption || '');
     await notion.createSleepEntry(data);
-    await bot.sendMessage(chatId, `✅ Sleep — ${data.bed_time} → ${data.wake_time}  (${data.hours_slept}h)  quality ${data.quality}/5`);
+    const isNap = data.type === 'Nap';
+    const label = isNap
+      ? `😪 Nap — ${data.bed_time} → ${data.wake_time} (${data.hours_slept}h)`
+      : `✅ Sleep — ${data.bed_time} → ${data.wake_time} (${data.hours_slept}h) quality ${data.quality}/5`;
+    await bot.sendMessage(chatId, label);
   } catch (err) {
     console.error('Sleep error:', err.message);
     await bot.sendMessage(chatId, '❌ Failed to log. Try: "slept at 1am, woke 8:30, quality 4"');
