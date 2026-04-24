@@ -196,6 +196,29 @@ const cleanOldReminders    = () => stmts.cleanOldReminders.run(Date.now() - 7 * 
 
 // ── Golf messages ─────────────────────────────────────────────────────────────
 
+// ── Chat history (for classifier context) ────────────────────────────────────
+
+db.exec(`CREATE TABLE IF NOT EXISTS chat_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER,
+  role TEXT,
+  text TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+)`);
+
+const _saveHistory = db.prepare('INSERT INTO chat_history (chat_id, role, text) VALUES (?, ?, ?)');
+const _getHistory  = db.prepare('SELECT role, text FROM chat_history WHERE chat_id=? ORDER BY id DESC LIMIT ?');
+const _trimHistory = db.prepare('DELETE FROM chat_history WHERE chat_id=? AND id NOT IN (SELECT id FROM chat_history WHERE chat_id=? ORDER BY id DESC LIMIT 20)');
+
+function saveHistory(chatId, role, text) {
+  _saveHistory.run(chatId, role, String(text).slice(0, 500));
+  _trimHistory.run(chatId, chatId);
+}
+
+const getHistory = (chatId, n = 10) => _getHistory.all(chatId, n).reverse();
+
+// ── Golf messages ─────────────────────────────────────────────────────────────
+
 const saveGolfMessage    = (chatId, role, content) => stmts.saveGolfMsg.run(chatId, role, content);
 const getGolfHistory     = (chatId, limit = 10)    => stmts.getGolfHistory.all(chatId, limit).reverse();
 const getGolfMessageCount = (chatId)               => stmts.countGolfMessages.get(chatId).c;
@@ -215,6 +238,7 @@ module.exports = {
   saveCoachMessage, getReplyChain, countExchanges, clearReplyChain,
   logMessage, getRecentMessages, wasRecentlyActive,
   saveReminder, getPendingReminders, markReminderFired, cleanOldReminders,
+  saveHistory, getHistory,
   saveGolfMessage, getGolfHistory, getGolfMessageCount,
   deleteOldGolfMessages, clearGolfHistory, replaceGolfHistory,
 };

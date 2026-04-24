@@ -48,11 +48,16 @@ Return ALL intents that apply. Examples:
 
 Return ONLY a JSON array, nothing else.`;
 
-async function classify(text) {
+async function classify(text, history = []) {
   try {
+    let content = text;
+    if (history.length > 0) {
+      const ctx = history.map(m => `${m.role === 'user' ? 'User' : 'Bot'}: ${m.text.slice(0, 150)}`).join('\n');
+      content = `[Recent conversation:\n${ctx}\n]\n\nClassify this message: ${text}`;
+    }
     const response = await anthropic.messages.create({
       model: HAIKU, max_tokens: 60, system: CLASSIFIER_SYSTEM,
-      messages: [{ role: 'user', content: text }],
+      messages: [{ role: 'user', content }],
     });
     const match = response.content[0].text.match(/\[[\s\S]*?\]/);
     if (!match) return ['GENERAL'];

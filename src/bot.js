@@ -215,7 +215,7 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
   }
 
   // ── Classify + dispatch ───────────────────────────────────────────────────
-  const intents = preIntents?.length ? preIntents : await claude.classify(msg.text);
+  const intents = preIntents?.length ? preIntents : await claude.classify(msg.text, db.getHistory(chatId, 10));
   db.logMessage(chatId, msg.text, intents.join(','), msg.message_id);
   if (!msg._retroDate) {
     const retro = detectRetroDate(msg.text);
@@ -231,6 +231,14 @@ function startBot() {
 
   const bot = new TelegramBot(config.telegram.healthToken, { polling: true });
   console.log('✅ Health bot polling started');
+
+  // Save bot text replies to chat history for classifier context
+  const _origSend = bot.sendMessage.bind(bot);
+  bot.sendMessage = async (chatId, text, opts) => {
+    const result = await _origSend(chatId, text, opts);
+    if (typeof text === 'string') db.saveHistory(chatId, 'assistant', text);
+    return result;
+  };
 
   cronSvc.init(bot);
 
@@ -251,8 +259,10 @@ function startBot() {
     // ── Classify early — used for wake/bed detection before state routing ─────
     let earlyIntents = [];
     if (msg.text) {
+      db.saveHistory(chatId, 'user', msg.text);
       await bot.sendChatAction(chatId, 'typing');
-      try { earlyIntents = await claude.classify(msg.text); } catch {}
+      const history = db.getHistory(chatId, 10);
+      try { earlyIntents = await claude.classify(msg.text, history); } catch {}
     }
     const isWake = earlyIntents.includes('WAKE');
     const isBed  = earlyIntents.includes('BED');
@@ -457,6 +467,13 @@ function startBot() {
             await bot.sendMessage(chatId, 'anything else? (or done)');
             pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
           }
+          return;
+        }
+
+        // If user is asking a question, answer it — don't log
+        if (earlyIntents.includes('COACH_QUESTION') && !earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i))) {
+          pendingStates.delete(chatId);
+          await handleAsk(bot, msg);
           return;
         }
 
