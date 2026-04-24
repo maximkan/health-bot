@@ -10,7 +10,7 @@ const db = new Database(DB_PATH);
 db.exec(`
   CREATE TABLE IF NOT EXISTS user_state (
     chat_id INTEGER PRIMARY KEY,
-    status TEXT DEFAULT 'awake',
+    status TEXT DEFAULT 'sleeping',
     current_day_start INTEGER,
     bed_time INTEGER
   );
@@ -109,7 +109,7 @@ function getState(chatId) {
   const OFFSET_MS = 8 * 60 * 60 * 1000;
   const nowMYT = new Date(Date.now() + OFFSET_MS);
   const midnightUTC = Date.UTC(nowMYT.getUTCFullYear(), nowMYT.getUTCMonth(), nowMYT.getUTCDate()) - OFFSET_MS;
-  return { chat_id: chatId, status: 'awake', current_day_start: midnightUTC, bed_time: null, caffeine_today_mg: 0, last_caffeine_time: null, last_coach_message_id: null, last_coach_context: null, bed_nudge_sent: 0, weekly_waiting_weight: 0 };
+  return { chat_id: chatId, status: 'sleeping', current_day_start: null, bed_time: null, caffeine_today_mg: 0, last_caffeine_time: null, last_coach_message_id: null, last_coach_context: null, bed_nudge_sent: 0, weekly_waiting_weight: 0 };
 }
 
 function setState(chatId, updates) {

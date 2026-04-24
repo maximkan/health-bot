@@ -73,6 +73,13 @@ async function showMealPreview(bot, msg, photos) {
 
 async function logMeal(bot, chatId, data, dayStart) {
   try {
+    // If meal time is more than 1hr in the future, drop it (user likely meant a past time)
+    if (data.time) {
+      const { getMalaysiaDateStr } = require('../utils/time');
+      const [h, m] = data.time.split(':').map(Number);
+      const mealMs = new Date(`${getMalaysiaDateStr()}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`).getTime();
+      if (mealMs - Date.now() > 60 * 60 * 1000) delete data.time;
+    }
     await notion.createMealEntry(data);
     const caffeineMg = data.caffeine_mg ?? 0;
     if (caffeineMg > 0) db.addCaffeine(chatId, caffeineMg);

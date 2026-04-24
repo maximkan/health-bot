@@ -1,5 +1,6 @@
 const claude = require('../claude');
 const notion = require('../notion');
+const gcal   = require('../gcal');
 const db     = require('../db');
 const { nowContext, getMalaysiaDateStr, getTomorrowStr } = require('../utils/time');
 
@@ -15,7 +16,16 @@ async function buildDayContext(chatId) {
   const timedTomorrow = db.getPendingTimed(chatId, getTomorrowStr());
   const tasks       = db.getPendingUntimed(chatId);
 
-  if (timedToday.length)    lines.push(`Today's plans: ${timedToday.map(p => `${p.plan_text} at ${p.plan_time}`).join(', ')}`);
+  // Merge SQLite plans with GCal events
+  const gcalToday = await gcal.getEventsForDate(todayStr).catch(() => []);
+  const dbTodayTitles = new Set(timedToday.map(p => p.plan_text.toLowerCase()));
+  const gcalTodayExtra = gcalToday.filter(e => !e.allDay && e.time && !dbTodayTitles.has(e.title.toLowerCase()));
+
+  const allToday = [
+    ...timedToday.map(p => `${p.plan_text} at ${p.plan_time}`),
+    ...gcalTodayExtra.map(e => `${e.title} at ${e.time}`),
+  ];
+  if (allToday.length)      lines.push(`Today's plans: ${allToday.join(', ')}`);
   if (timedTomorrow.length) lines.push(`Tomorrow's plans: ${timedTomorrow.map(p => `${p.plan_text} at ${p.plan_time}`).join(', ')}`);
   if (tasks.length)         lines.push(`Pending tasks: ${tasks.map(p => p.plan_text).join(', ')}`);
 

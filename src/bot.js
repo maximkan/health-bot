@@ -221,6 +221,15 @@ function startBot() {
           pendingStates.delete(chatId);
           // fall through to wake detection below
         } else {
+          // If it's a past log (workout/meal/recovery/sleep/weight), route to handlers — not a plan
+          const LOG_INTENTS = ['WORKOUT_LOG','MEAL_LOG','DRINK_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG'];
+          if (earlyIntents.some(i => LOG_INTENTS.includes(i))) {
+            pendingStates.delete(chatId);
+            await routeMessage(bot, msg, chatId, db.getState(chatId), earlyIntents);
+            pendingStates.set(chatId, { type: 'bed_plans', pushback_sent: true });
+            return;
+          }
+
           const isDone = earlyIntents.includes('GENERAL') && !earlyIntents.some(i => ['PLAN','MEAL_LOG','WORKOUT_LOG','RECOVERY_LOG'].includes(i))
             && /^(no|nah|nope|skip|none|that'?s? it|done|nothing|all good|that's all)$/i.test((msg.text||'').trim());
 

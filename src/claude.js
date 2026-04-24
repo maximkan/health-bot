@@ -23,9 +23,9 @@ Intents:
 - DRINK_LOG: logging a drink (coffee, tea, shake, smoothie, milo, teh tarik, juice, energy drink, alcohol)
 - WORKOUT_LOG: logging exercise or training they did
 - RECOVERY_LOG: logging sauna or cold plunge
-- SLEEP_LOG: logging sleep (NOT going to bed — that's BED)
+- SLEEP_LOG: reporting past sleep ("went to bed at 2am", "slept 6 hours", "woke up at 9", "slept from 1-8am")
 - WEIGHT_LOG: logging body weight or body fat
-- BED: going to sleep, bedtime, good night, gn, ночь, спать, спокойной ночи
+- BED: RIGHT NOW going to sleep — present intent only ("gn", "good night", "going to sleep", "heading to bed", "night", "спать", "спокойной ночи")
 - WAKE: waking up, morning, first message, доброе утро
 - PLAN: creating a plan, reminder, event, scheduling something
 - PLAN_DONE: confirming a task is done
