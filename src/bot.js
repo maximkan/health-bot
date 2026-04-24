@@ -404,8 +404,7 @@ function startBot() {
           await bot.sendMessage(chatId, '❌ Cancelled.');
           return;
         }
-        const isCorrectionIntent = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i))
-          || /\b(lesson|break|rest|actually|more like|not|wrong|instead|change|edit|fix)\b/i.test(text);
+        const isCorrectionIntent = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i));
         if (!isCorrectionIntent) {
           pendingStates.delete(chatId);
           await logWorkout(bot, chatId, state.workoutData);
