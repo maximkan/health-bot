@@ -101,7 +101,7 @@ KNOWN FOODS RULES (when a Known Foods section is provided):
 - If the photo could plausibly NOT be NS (restaurant plating, single dish, home-cooked style): set confidence="low", clarification="Is this an NS dinner? (yes/no)"
 - Never invent macros for items that exist in Known Foods — match and use, don't re-estimate
 
-Parse time from the message if present ("had lunch at 12:30" → time = "12:30").
+Parse time from the message in any format ("at 12:30", "at 11 30 am", "around noon", "just now", "1pm", "13:00") → always output as 24h "HH:MM". Omit time field only if truly no time mentioned.
 
 Drink type rules: ANY beverage (coffee, tea, shake, smoothie, juice, milo, teh tarik, sirap, bandung, alcohol, water with flavoring) = Drink type, regardless of time.
 
@@ -163,12 +163,15 @@ Calories = MET × 105kg × hours. MET values:
 - Weight training moderate: 3.5, vigorous: 6.0
 - Swimming: 7.0, Running 8km/h: 8.0, Golf walking: 4.3, Tennis: 7.3, Yoga: 2.5, Hiking: 6.0
 
+Time parsing: extract the START time of the workout if mentioned in any format ("8am", "8:00", "8 to 10am" → "08:00", "from 9" → "09:00"). Use 24h "HH:MM" format. Omit if no time mentioned.
+
 Return ONLY JSON:
 {
   "workout_name": "Legs Day",
   "activity_type": "legs",
   "duration_min": 45,
   "calories_burned": 280,
+  "time": "08:00",
   "exercises": [{"name": "Squats", "sets": 4, "reps": 10, "weight_kg": 60}],
   "exercises_summary": "squats 4x10@60kg, lunges 3x12"
 }`;

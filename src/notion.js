@@ -153,7 +153,7 @@ async function createWorkoutEntry(data) {
     parent: { database_id: config.notion.db.workoutLog },
     properties: {
       Workout:          { title: rt(workout_name) },
-      Date:             { date: { start: data.date ? buildDateTimeISO(data.date, null) : getMalaysiaISO() } },
+      Date:             { date: { start: data.date ? buildDateTimeISO(data.date, data.time || null) : (data.time ? buildTimeISO(data.time) : getMalaysiaISO()) } },
       'Activity Type':  { rich_text: rt(activity_type) },
       'Duration (min)': { number: duration_min },
       'Calories Burned':{ number: calories_burned },
@@ -196,7 +196,7 @@ async function createRecoveryEntry(data) {
   ];
   const props = {
     Session:          { title: rt(sessionName) },
-    Date:             { date: { start: data.date ? buildDateTimeISO(data.date, null) : getMalaysiaISO() } },
+    Date:             { date: { start: data.date ? buildDateTimeISO(data.date, data.time || null) : (data.time ? buildTimeISO(data.time) : getMalaysiaISO()) } },
     Type:             { select: { name: type } },
     'Duration (min)': { number: duration_min },
     Notes:            { rich_text: rt(notes) },

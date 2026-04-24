@@ -5,7 +5,8 @@ function formatWorkoutPreview(data) {
   const dur = data.duration_min ? `${data.duration_min} min` : null;
   const cal = data.calories_burned ? `~${data.calories_burned} kcal burned` : null;
   const retro = data.date ? ` (${data.date})` : '';
-  const header = `💪 ${[data.workout_name + retro, dur, cal].filter(Boolean).join(' — ')}`;
+  const timeLabel = data.time ? ` @ ${data.time}` : '';
+  const header = `💪 ${[data.workout_name + retro, dur, cal].filter(Boolean).join(' — ')}${timeLabel}`;
   const exLines = (data.exercises || []).slice(0, 6).map(e => {
     let s = `  ${e.name}`;
     if (e.sets && e.reps) s += ` ${e.sets}×${e.reps}`;
