@@ -265,7 +265,7 @@ function startBot() {
       db.setState(chatId, { bed_nudge_sent: 0, weekly_waiting_weight: 0 });
       const wakeOverride = extractTimeMs(msg.text);
       const wakeData = await day.handleMorningWake(bot, chatId, userState, wakeOverride);
-      pendingStates.set(chatId, { type: 'morning_quality', wakeData, pendingMsg: msg });
+      pendingStates.set(chatId, { type: 'morning_quality', wakeData, pendingMsg: msg, pendingIntents: earlyIntents });
       return;
     }
 
@@ -288,8 +288,11 @@ function startBot() {
         if (!quality) { await bot.sendMessage(chatId, 'quality? (1-5)'); return; }
         pendingStates.delete(chatId);
         await day.processQuality(bot, chatId, quality, state.wakeData);
-        if (state.pendingMsg && !isWakeTrigger(state.pendingMsg)) {
-          await routeMessage(bot, state.pendingMsg, chatId, db.getState(chatId));
+        // Only re-route the wake message if it contains actual logs (not just WAKE/GENERAL)
+        const LOG_TYPES = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','PLAN'];
+        const hasLogs = state.pendingIntents?.some(i => LOG_TYPES.includes(i));
+        if (state.pendingMsg && hasLogs) {
+          await routeMessage(bot, state.pendingMsg, chatId, db.getState(chatId), state.pendingIntents);
         }
         return;
       }
