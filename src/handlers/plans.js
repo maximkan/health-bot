@@ -24,7 +24,9 @@ async function handlePlan(bot, msg) {
     const activityCtx = (!isSleeping && activityTomorrow !== getTomorrowStr())
       ? `\nIMPORTANT: The user's activity day is ${activityDate} (they woke up then and have not slept yet). For scheduling: today = ${activityDate}, tomorrow = ${activityTomorrow}.`
       : '';
+    console.log(`[plan] isSleeping=${isSleeping} activityDate=${activityDate} activityTomorrow=${activityTomorrow} calTomorrow=${getTomorrowStr()} fallback=${fallbackDate}`);
     const plans = await claude.parsePlans(msg.text || '', nowContext() + activityCtx);
+    console.log(`[plan] parsed:`, JSON.stringify(plans.map(p => ({title:p.title,date:p.date,time:p.time}))));
     if (!plans.length) {
       await handleAskFallback(bot, msg);
       return;
