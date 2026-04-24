@@ -81,13 +81,21 @@ async function processQuality(bot, chatId, quality, wakeData) {
   }
 
   const allTimed = [
-    ...timedToday.map(p => `${p.plan_text} at ${p.plan_time}`),
-    ...gcalExtra.map(e => `${e.title} at ${e.time}`),
-  ];
+    ...timedToday.map(p => ({ time: p.plan_time, title: p.plan_text })),
+    ...gcalExtra.map(e => ({ time: e.time, title: e.title })),
+  ].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const dateHeader = `📅 ${days[now.getUTCDay()]}, ${months[now.getUTCMonth()]} ${now.getUTCDate()}`;
 
   const lines = [];
-  if (allTimed.length) lines.push(`today:\n${allTimed.map(t => `• ${t}`).join('\n')}`);
-  if (tasks.length)    lines.push(`tasks:\n${tasks.map(p => `• ${p.plan_text}`).join('\n')}`);
+  if (allTimed.length) {
+    const items = allTimed.map(e => `• ${e.time} — ${e.title}`).join('\n');
+    lines.push(`${dateHeader}\n${items}`);
+  }
+  if (tasks.length) lines.push(`📋 tasks:\n${tasks.map(p => `• ${p.plan_text}`).join('\n')}`);
 
   if (lines.length) await bot.sendMessage(chatId, lines.join('\n\n'));
 }
@@ -125,7 +133,15 @@ async function handleBedTime(bot, chatId, state) {
     ...gcalExtra.map(e => e.time ? `${e.title} at ${e.time}` : e.title),
   ];
   if (allTomorrow.length) {
-    await bot.sendMessage(chatId, `btw, tomorrow:\n${allTomorrow.map(t => `• ${t}`).join('\n')}`);
+    const tomorrowSorted = [
+      ...timedTomorrow.map(p => ({ time: p.plan_time, title: p.plan_text })),
+      ...gcalExtra.map(e => ({ time: e.time, title: e.title })),
+    ].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    const days2 = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const months2 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const tom = new Date(Date.now() + 8 * 3600 * 1000 + 86400000);
+    const tomHeader = `📅 ${days2[tom.getUTCDay()]}, ${months2[tom.getUTCMonth()]} ${tom.getUTCDate()}`;
+    await bot.sendMessage(chatId, `tomorrow:\n${tomHeader}\n${tomorrowSorted.map(e => `• ${e.time} — ${e.title}`).join('\n')}`);
   }
 
   db.setState(chatId, { bed_plans_tomorrow: tomorrow }); // real calendar tomorrow

@@ -287,8 +287,35 @@ function startBot() {
         const quality = parseQuality(msg.text || '');
         if (!quality) { await bot.sendMessage(chatId, 'quality? (1-5)'); return; }
         pendingStates.delete(chatId);
+        if (!state.wakeData.hasBed) {
+          // No bed time recorded — ask before logging sleep
+          await bot.sendMessage(chatId, 'what time did you fall asleep? (e.g. 1am, or skip)');
+          pendingStates.set(chatId, { type: 'morning_bed_time', quality, wakeData: state.wakeData, pendingMsg: state.pendingMsg, pendingIntents: state.pendingIntents });
+          return;
+        }
         await day.processQuality(bot, chatId, quality, state.wakeData);
-        // Only re-route the wake message if it contains actual logs (not just WAKE/GENERAL)
+        const LOG_TYPES = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','PLAN'];
+        const hasLogs = state.pendingIntents?.some(i => LOG_TYPES.includes(i));
+        if (state.pendingMsg && hasLogs) {
+          await routeMessage(bot, state.pendingMsg, chatId, db.getState(chatId), state.pendingIntents);
+        }
+        return;
+      }
+
+      if (state.type === 'morning_bed_time') {
+        const text = (msg.text || '').toLowerCase().trim();
+        const skip = /^(skip|no|idk|dunno|don't know|not sure|-)$/.test(text);
+        let wakeData = state.wakeData;
+        if (!skip) {
+          const bedMs = extractTimeMs(msg.text);
+          if (bedMs) {
+            wakeData = { ...wakeData, hasBed: true, bedMs };
+            const sleepMs = Math.max(0, wakeData.newDayStart - bedMs - 20 * 60 * 1000);
+            wakeData.sleepH = Math.round(sleepMs / 3600000 * 10) / 10;
+          }
+        }
+        pendingStates.delete(chatId);
+        await day.processQuality(bot, chatId, state.quality, wakeData);
         const LOG_TYPES = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','PLAN'];
         const hasLogs = state.pendingIntents?.some(i => LOG_TYPES.includes(i));
         if (state.pendingMsg && hasLogs) {
