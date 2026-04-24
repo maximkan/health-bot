@@ -511,7 +511,7 @@ function startBot() {
     await routeMessage(bot, msg, chatId, userState, earlyIntents);
     } catch (err) {
       console.error('Unhandled message error:', err.message, err.stack);
-      try { await bot.sendMessage(chatId, '❌ Something went wrong. Try again.'); } catch {}
+      try { await bot.sendMessage(chatId, `❌ ${err.message || 'unknown error'}`); } catch {}
     }
   });
 
