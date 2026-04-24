@@ -415,6 +415,11 @@ function startBot() {
           await bot.sendMessage(chatId, '❌ Cancelled.');
           return;
         }
+        if (earlyIntents.includes('COACH_QUESTION') && !earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i))) {
+          pendingStates.delete(chatId);
+          await handleAsk(bot, msg);
+          return;
+        }
         const isCorrectionIntent = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i));
         if (!isCorrectionIntent) {
           pendingStates.delete(chatId);
