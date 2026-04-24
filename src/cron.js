@@ -20,7 +20,7 @@ function init(bot) {
   cron.schedule('0  15 * * *', () => runProactive('15:00'), tz);
   cron.schedule('0  19 * * *', () => runProactive('19:00'), tz);
   cron.schedule('0  */2 * * *', runUntimedReminders,   tz); // every 2 hrs
-  cron.schedule('*/30 6-23 * * *', runGCalSync,        tz); // every 30 min, 6am–11pm
+  cron.schedule('*/30 * * * *', runGCalSync,            tz); // every 30 min
 
   rescheduleAll();
   console.log('✅ Cron jobs scheduled');
