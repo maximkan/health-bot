@@ -20,6 +20,7 @@ function init(bot) {
   cron.schedule('0  15 * * *', () => runProactive('15:00'), tz);
   cron.schedule('0  19 * * *', () => runProactive('19:00'), tz);
   cron.schedule('0  */2 * * *', runUntimedReminders,   tz); // every 2 hrs
+  cron.schedule('*/30 6-23 * * *', runGCalSync,        tz); // every 30 min, 6am–11pm
 
   rescheduleAll();
   console.log('✅ Cron jobs scheduled');
@@ -152,6 +153,33 @@ async function runUntimedReminders() {
       await _bot.sendMessage(chatId, msg);
       for (const task of tasks) db.markPlanReminded(task.id);
     } catch (e) { console.error('Untimed reminder error:', e.message); }
+  }
+}
+
+// ── GCal mid-day sync ─────────────────────────────────────────────────────────
+
+async function runGCalSync() {
+  const gcal  = require('./gcal');
+  const { scheduleTimedPlanReminders } = require('./handlers/plans');
+  const todayStr = getMalaysiaDateStr();
+
+  for (const chatId of db.getAllChatIds()) {
+    const state = db.getState(chatId);
+    if (state.status !== 'awake') continue;
+    try {
+      const events = await gcal.getEventsForDate(todayStr).catch(() => []);
+      const existing = new Set(db.getPendingTimed(chatId, todayStr).map(p => p.plan_text.toLowerCase()));
+      for (const event of events) {
+        if (!event.time || event.allDay) continue;
+        if (existing.has(event.title.toLowerCase())) continue;
+        // New event not yet in SQLite — save and schedule
+        const planId = db.savePlan(chatId, { text: event.title, date: todayStr, time: event.time });
+        scheduleTimedPlanReminders(chatId, planId, { title: event.title, date: todayStr, time: event.time });
+        console.log(`GCal sync: scheduled reminder for "${event.title}" at ${event.time}`);
+      }
+    } catch (e) {
+      console.error('GCal sync error:', e.message);
+    }
   }
 }
 
