@@ -78,10 +78,10 @@ async function processQuality(bot, chatId, quality, wakeData) {
   ];
 
   const lines = [];
-  if (allTimed.length) lines.push(`today: ${allTimed.join(', ')}`);
-  if (tasks.length)    lines.push(`tasks: ${tasks.map(p => p.plan_text).join(', ')}`);
+  if (allTimed.length) lines.push(`today:\n${allTimed.map(t => `• ${t}`).join('\n')}`);
+  if (tasks.length)    lines.push(`tasks:\n${tasks.map(p => `• ${p.plan_text}`).join('\n')}`);
 
-  if (lines.length) await bot.sendMessage(chatId, lines.join('\n'));
+  if (lines.length) await bot.sendMessage(chatId, lines.join('\n\n'));
 }
 
 // ── Bed flow ──────────────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ async function handleBedTime(bot, chatId, state) {
     ...gcalExtra.map(e => e.time ? `${e.title} at ${e.time}` : e.title),
   ];
   if (allTomorrow.length) {
-    await bot.sendMessage(chatId, `btw, tomorrow you have: ${allTomorrow.join(', ')}`);
+    await bot.sendMessage(chatId, `btw, tomorrow:\n${allTomorrow.map(t => `• ${t}`).join('\n')}`);
   }
 
   db.setState(chatId, { bed_plans_tomorrow: tomorrow }); // real calendar tomorrow

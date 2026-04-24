@@ -68,7 +68,7 @@ async function handlePlan(bot, msg) {
       }
     }
 
-    await bot.sendMessage(chatId, confirmations.join('\n'));
+    await bot.sendMessage(chatId, confirmations.join('\n\n'));
   } catch (err) {
     console.error('Plan handler error:', err.message);
     await bot.sendMessage(chatId, '❌ Could not save plan. Try: "gym tomorrow at 10am"');
