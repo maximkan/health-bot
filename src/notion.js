@@ -85,12 +85,7 @@ async function getTargetsText() {
 // ── Day range filter ──────────────────────────────────────────────────────────
 
 function dayRangeFilter(dayStartMs) {
-  return {
-    and: [
-      { property: 'Date', date: { on_or_after: tsToISO(dayStartMs) } },
-      { property: 'Date', date: { on_or_before: getMalaysiaISO() } },
-    ],
-  };
+  return { property: 'Date', date: { on_or_after: tsToISO(dayStartMs) } };
 }
 
 // ── Meal Log ──────────────────────────────────────────────────────────────────
@@ -381,10 +376,9 @@ async function getGolfHubContent() {
 
 async function getDailyMealTotals(dayStartMs) {
   if (!config.notion.db.mealLog) return { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  const filter = dayStartMs ? dayRangeFilter(dayStartMs) : (() => {
-    const { start, end } = getTodayRange();
-    return { and: [{ property: 'Date', date: { on_or_after: start } }, { property: 'Date', date: { before: end } }] };
-  })();
+  // Use provided dayStart, or fall back to 20h ago (activity-day aware, not calendar midnight)
+  const effectiveStart = dayStartMs || (Date.now() - 20 * 3600 * 1000);
+  const filter = dayRangeFilter(effectiveStart);
   const response = await notion.databases.query({ database_id: config.notion.db.mealLog, filter });
   return response.results.reduce((acc, page) => {
     const p = page.properties;
@@ -400,7 +394,7 @@ async function getDrinkEntries(dayStartMs) {
   if (!config.notion.db.mealLog) return [];
   const response = await notion.databases.query({
     database_id: config.notion.db.mealLog,
-    filter: { and: [dayRangeFilter(dayStartMs).and[0], { property: 'Meal Type', select: { equals: 'Drink' } }] },
+    filter: { and: [dayRangeFilter(dayStartMs), { property: 'Meal Type', select: { equals: 'Drink' } }] },
   }).catch(() => ({ results: [] }));
   return response.results.map(page => {
     const p = page.properties;

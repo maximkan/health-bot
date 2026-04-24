@@ -74,17 +74,11 @@ async function showMealPreview(bot, msg, photos) {
 
 async function logMeal(bot, chatId, data, dayStart) {
   try {
-    // Drop future times only when not retroactively logging
-    if (data.time && !data.date) {
-      const { getMalaysiaDateStr } = require('../utils/time');
-      const [h, m] = data.time.split(':').map(Number);
-      const mealMs = new Date(`${getMalaysiaDateStr()}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`).getTime();
-      if (mealMs > Date.now()) delete data.time;
-    }
     await notion.createMealEntry(data);
     const caffeineMg = data.caffeine_mg ?? 0;
     if (caffeineMg > 0) db.addCaffeine(chatId, caffeineMg);
 
+    console.log(`logMeal dayStart=${dayStart} (${dayStart ? new Date(dayStart).toISOString() : 'null'})`);
     let totals  = null;
     let targets = null;
     try { totals  = await notion.getDailyMealTotals(dayStart); } catch {}

@@ -99,7 +99,8 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     return;
   }
 
-  if (intents.includes('CORRECTION')) {
+  // Only treat as CORRECTION if no meal intent — "had pizza at 1pm" is a meal, not a correction
+  if (intents.includes('CORRECTION') && !intents.some(i => MEAL_SET.has(i))) {
     const result = await handleCorrection(bot, msg, chatId, userState);
     if (result?.lines) {
       pendingStates.set(chatId, { type: 'time_correction_select', entries: result.entries, newISO: result.newISO });
@@ -476,9 +477,11 @@ function startBot() {
 
       if (state.type === 'meal_text_clarification') {
         pendingStates.delete(chatId);
-        const fakeMsg = { ...msg, text: `${state.originalText}. ${msg.text || ''}`, caption: undefined };
+        const combinedText = `${state.originalText}. ${msg.text || ''}`;
+        const fakeMsg = { ...msg, text: combinedText, caption: undefined };
         const data = await showMealPreview(bot, fakeMsg, null);
         if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+        else pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: combinedText, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
         return;
       }
 

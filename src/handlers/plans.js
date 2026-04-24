@@ -11,11 +11,17 @@ async function handlePlan(bot, msg) {
   try {
     const userState = db.getState(chatId);
     const isSleeping = userState.status === 'sleeping';
+    const activityTomorrow = userState.current_day_start
+      ? getActivityTomorrowStr(userState.current_day_start)
+      : getTomorrowStr();
     const fallbackDate = isSleeping
       ? (userState.bed_plans_tomorrow || getTomorrowStr())
-      : getTomorrowStr();
+      : activityTomorrow;
 
-    const plans = await claude.parsePlans(msg.text || '', nowContext());
+    const activityCtx = (!isSleeping && activityTomorrow !== getTomorrowStr())
+      ? `\nNote: user is still awake from their current activity day. 'Tomorrow' means ${activityTomorrow}, not ${getTomorrowStr()}.`
+      : '';
+    const plans = await claude.parsePlans(msg.text || '', nowContext() + activityCtx);
     if (!plans.length) {
       await handleAskFallback(bot, msg);
       return;
@@ -23,7 +29,12 @@ async function handlePlan(bot, msg) {
 
     const confirmations = [];
     for (const plan of plans) {
-      const planDate = (!plan.date || (isSleeping && plan.date === getTodayStr())) ? fallbackDate : plan.date;
+      const calTomorrow = getTomorrowStr();
+      const planDate = (!plan.date || (isSleeping && plan.date === getTodayStr()))
+        ? fallbackDate
+        : (!isSleeping && plan.date === calTomorrow && activityTomorrow !== calTomorrow)
+          ? activityTomorrow  // remap calendar-tomorrow → activity-tomorrow when past midnight
+          : plan.date;
       const planId = db.savePlan(chatId, {
         text:      plan.title,
         date:      planDate,
