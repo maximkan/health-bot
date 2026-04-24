@@ -199,6 +199,8 @@ function scheduleOnce(chatId, atMs, fn) {
 
 function rescheduleAll() {
   db.cleanOldReminders();
+
+  // Re-fire persisted reminders
   const pending = db.getPendingReminders();
   for (const r of pending) {
     scheduleOnce(r.chat_id, r.fire_ms, async () => {
@@ -206,7 +208,18 @@ function rescheduleAll() {
       try { await _bot.sendMessage(r.chat_id, r.text); } catch (e) { console.error('Reminder send error:', e.message); }
     });
   }
-  if (pending.length) console.log(`✅ Rescheduled ${pending.length} pending reminder(s)`);
+  if (pending.length) console.log(`✅ Rescheduled ${pending.length} persisted reminder(s)`);
+
+  // Also schedule any pending timed plans that have no reminder entry yet
+  const { scheduleTimedPlanReminders } = require('./handlers/plans');
+  for (const chatId of db.getAllChatIds()) {
+    const { getMalaysiaDateStr } = require('./utils/time');
+    const today = getMalaysiaDateStr();
+    const timedPlans = db.getPendingTimed(chatId, today);
+    for (const plan of timedPlans) {
+      scheduleTimedPlanReminders(chatId, plan.id, { title: plan.plan_text, date: plan.plan_date, time: plan.plan_time });
+    }
+  }
 }
 
 module.exports = { init, scheduleOnce, rescheduleAll, getBotRef };
