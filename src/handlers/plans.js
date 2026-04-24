@@ -18,8 +18,11 @@ async function handlePlan(bot, msg) {
       ? (userState.bed_plans_tomorrow || getTomorrowStr())
       : activityTomorrow;
 
+    const activityDate = userState.current_day_start
+      ? require('../utils/time').tsToISO(userState.current_day_start).split('T')[0]
+      : getTodayStr();
     const activityCtx = (!isSleeping && activityTomorrow !== getTomorrowStr())
-      ? `\nNote: user is still awake from their current activity day. 'Tomorrow' means ${activityTomorrow}, not ${getTomorrowStr()}.`
+      ? `\nIMPORTANT: The user's activity day is ${activityDate} (they woke up then and have not slept yet). For scheduling: today = ${activityDate}, tomorrow = ${activityTomorrow}.`
       : '';
     const plans = await claude.parsePlans(msg.text || '', nowContext() + activityCtx);
     if (!plans.length) {
