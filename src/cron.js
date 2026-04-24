@@ -161,6 +161,7 @@ async function runUntimedReminders() {
 async function runGCalSync() {
   const gcal  = require('./gcal');
   const { scheduleTimedPlanReminders } = require('./handlers/plans');
+  const { getDateAt } = require('./utils/time');
   const todayStr = getMalaysiaDateStr();
 
   for (const chatId of db.getAllChatIds()) {
@@ -172,10 +173,21 @@ async function runGCalSync() {
       for (const event of events) {
         if (!event.time || event.allDay) continue;
         if (existing.has(event.title.toLowerCase())) continue;
-        // New event not yet in SQLite — save and schedule
+
         const planId = db.savePlan(chatId, { text: event.title, date: todayStr, time: event.time });
-        scheduleTimedPlanReminders(chatId, planId, { title: event.title, date: todayStr, time: event.time });
-        console.log(`GCal sync: scheduled reminder for "${event.title}" at ${event.time}`);
+        const [h, m] = event.time.split(':').map(Number);
+        const eventMs = getDateAt(todayStr, h, m);
+        const minsUntil = (eventMs - Date.now()) / 60000;
+        const reminderMs = eventMs - 30 * 60 * 1000;
+
+        if (reminderMs > Date.now()) {
+          // Normal: reminder window still in future
+          scheduleTimedPlanReminders(chatId, planId, { title: event.title, date: todayStr, time: event.time });
+        } else if (minsUntil > 0 && minsUntil <= 60) {
+          // Reminder window just passed but event still upcoming — fire immediately
+          _bot?.sendMessage(chatId, `heads up: ${event.title} at ${event.time} (in ${Math.round(minsUntil)} min)`).catch(() => {});
+        }
+        console.log(`GCal sync: picked up "${event.title}" at ${event.time}`);
       }
     } catch (e) {
       console.error('GCal sync error:', e.message);

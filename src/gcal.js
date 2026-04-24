@@ -43,12 +43,16 @@ async function getEventsForDate(dateStr) {
     singleEvents: true,
     orderBy: 'startTime',
   });
-  return (res.data.items || []).map(e => ({
-    title: e.summary || '(no title)',
-    time:  e.start?.dateTime ? e.start.dateTime.slice(11, 16) : null,
-    allDay: !!e.start?.date,
-    id: e.id,
-  }));
+  return (res.data.items || []).map(e => {
+    let time = null;
+    if (e.start?.dateTime) {
+      // Parse the full ISO datetime and convert to MYT (UTC+8)
+      const utcMs = new Date(e.start.dateTime).getTime();
+      const myt = new Date(utcMs + 8 * 3600 * 1000);
+      time = `${String(myt.getUTCHours()).padStart(2,'0')}:${String(myt.getUTCMinutes()).padStart(2,'0')}`;
+    }
+    return { title: e.summary || '(no title)', time, allDay: !!e.start?.date, id: e.id };
+  });
 }
 
 module.exports = { createEvent, getEventsForDate };
