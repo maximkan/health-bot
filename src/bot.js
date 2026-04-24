@@ -256,10 +256,15 @@ function startBot() {
       }
     }
 
+    // ── Log every user message immediately so wasRecentlyActive works ──────────
+    if (msg.text) {
+      db.saveHistory(chatId, 'user', msg.text);
+      db.logMessage(chatId, msg.text, 'incoming', msg.message_id);
+    }
+
     // ── Classify early — used for wake/bed detection before state routing ─────
     let earlyIntents = [];
     if (msg.text) {
-      db.saveHistory(chatId, 'user', msg.text);
       await bot.sendChatAction(chatId, 'typing');
       const history = db.getHistory(chatId, 10);
       try { earlyIntents = await claude.classify(msg.text, history); } catch {}
