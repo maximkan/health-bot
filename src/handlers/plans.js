@@ -126,13 +126,12 @@ async function handlePlanSkip(bot, msg) {
     const pending = db.getAllPending(chatId);
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans.'); return; }
     const plan = await claude.matchPlanToModify(msg.text, pending);
-    const tomorrow = getTomorrowStr();
     db.updatePlanStatus(plan.id, 'skipped');
-    db.savePlan(chatId, { text: plan.plan_text, date: tomorrow, time: null, recurring: 'one-time' });
-    await bot.sendMessage(chatId, `Moved to tomorrow: ${plan.plan_text}.`);
+    if (plan.notion_page_id) await notion.updatePlanStatusNotion(plan.notion_page_id, 'Cancelled').catch(() => {});
+    await bot.sendMessage(chatId, `Cancelled: ${plan.plan_text}.`);
   } catch (err) {
     console.error('Plan skip error:', err.message);
-    await bot.sendMessage(chatId, '❌ Could not update plan.');
+    await bot.sendMessage(chatId, '❌ Could not cancel plan.');
   }
 }
 
