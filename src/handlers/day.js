@@ -116,7 +116,9 @@ async function handleBedTime(bot, chatId, state) {
     await bot.sendMessage(chatId, 'logged. good work today.');
   }
 
-  const tomorrow = getTomorrowStr();
+  const tomorrow = state.current_day_start
+    ? getActivityTomorrowStr(state.current_day_start)
+    : getTomorrowStr();
   const timedTomorrow = db.getPendingTimed(chatId, tomorrow);
   const gcalTomorrow  = await gcal.getEventsForDate(tomorrow).catch(() => []);
   const dbTitles = new Set(timedTomorrow.map(p => p.plan_text.toLowerCase()));
@@ -132,12 +134,13 @@ async function handleBedTime(bot, chatId, state) {
     ].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
     const days2 = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     const months2 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const tom = new Date(Date.now() + 8 * 3600 * 1000 + 86400000);
+    const [ty, tm, td] = tomorrow.split('-').map(Number);
+    const tom = new Date(Date.UTC(ty, tm - 1, td));
     const tomHeader = `📅 ${days2[tom.getUTCDay()]}, ${months2[tom.getUTCMonth()]} ${tom.getUTCDate()}`;
     await bot.sendMessage(chatId, `tomorrow:\n${tomHeader}\n${tomorrowSorted.map(e => `• ${e.time} — ${e.title}`).join('\n')}`);
   }
 
-  db.setState(chatId, { bed_plans_tomorrow: tomorrow }); // real calendar tomorrow
+  db.setState(chatId, { bed_plans_tomorrow: tomorrow });
   await bot.sendMessage(chatId, 'any more plans for tomorrow?');
 }
 
