@@ -92,6 +92,7 @@ async function processQuality(bot, chatId, quality, wakeData) {
   if (tasks.length) lines.push(`📋 tasks:\n${tasks.map(p => `• ${p.plan_text}`).join('\n')}`);
 
   if (lines.length) await bot.sendMessage(chatId, lines.join('\n\n'));
+  else await bot.sendMessage(chatId, 'no plans registered for today. enjoy your day.');
 }
 
 // ── Bed flow ──────────────────────────────────────────────────────────────────
