@@ -88,6 +88,12 @@ async function maybeTriggerCatchup(bot, chatId, wakeData) {
 async function dispatchIntents(bot, msg, chatId, userState, intents) {
   // BED: highest priority
   if (intents.includes('BED')) {
+    const text = (msg.text || '').toLowerCase();
+    const isFutureIntent = /\b(soon|gonna|in a bit|later|not yet|finishing|still|few minutes|few mins|almost)\b/.test(text);
+    if (isFutureIntent) {
+      await bot.sendMessage(chatId, 'ok, message me when you actually head to bed.');
+      return;
+    }
     pendingStates.delete(chatId);
     await day.handleBedTime(bot, chatId, userState);
     pendingStates.set(chatId, { type: 'bed_plans', pushback_sent: false });
