@@ -2,7 +2,7 @@ const claude = require('../claude');
 const notion = require('../notion');
 const gcal   = require('../gcal');
 const db     = require('../db');
-const { nowContext, getMalaysiaDateStr, getTomorrowStr } = require('../utils/time');
+const { nowContext, getMalaysiaDateStr, getTomorrowStr, getMalaysiaHour } = require('../utils/time');
 
 const FULL_ANALYSIS_TRIGGERS = ['full analysis','progress report','how am i doing overall','summary since beginning','how\'s my progress','how is my progress','overall progress'];
 
@@ -26,7 +26,7 @@ async function buildDayContext(chatId) {
     ...gcalTodayExtra.map(e => `${e.title} at ${e.time}`),
   ];
   if (allToday.length)      lines.push(`Today's plans: ${allToday.join(', ')}`);
-  if (timedTomorrow.length) lines.push(`Tomorrow's plans: ${timedTomorrow.map(p => `${p.plan_text} at ${p.plan_time}`).join(', ')}`);
+  if (timedTomorrow.length && getMalaysiaHour() >= 19) lines.push(`Tomorrow's plans: ${timedTomorrow.map(p => `${p.plan_text} at ${p.plan_time}`).join(', ')}`);
   if (tasks.length)         lines.push(`Pending tasks: ${tasks.map(p => p.plan_text).join(', ')}`);
 
   // Today's totals from Notion

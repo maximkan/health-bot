@@ -16,14 +16,32 @@ function init(bot) {
   cron.schedule('0  2  * * *', () => runBedNudge(2),   tz); // 2:00 AM
   cron.schedule('0  3  * * *', runAutoBed,             tz); // 3:00 AM
   cron.schedule('0  8  * * 1', runWeeklyReview,        tz); // Monday 8 AM
-  cron.schedule('0  11 * * *', () => runProactive('11:00'), tz);
-  cron.schedule('0  15 * * *', () => runProactive('15:00'), tz);
-  cron.schedule('0  19 * * *', () => runProactive('19:00'), tz);
+  cron.schedule('0  8  * * *', scheduleProactiveForDay, tz); // reschedule daily at 8am
   cron.schedule('0  */2 * * *', runUntimedReminders,   tz); // every 2 hrs
   cron.schedule('*/30 * * * *', runGCalSync,            tz); // every 30 min
 
+  scheduleProactiveForDay();
   rescheduleAll();
   console.log('✅ Cron jobs scheduled');
+}
+
+// ── Randomised proactive checks ───────────────────────────────────────────────
+
+function scheduleProactiveForDay() {
+  const { getDateAt, getMalaysiaDateStr } = require('./utils/time');
+  const todayStr = getMalaysiaDateStr();
+  const windows = [[10, 13], [14, 17], [19, 21]];
+  for (const [start, end] of windows) {
+    const h = start + Math.floor(Math.random() * (end - start));
+    const m = Math.floor(Math.random() * 60);
+    const fireMs = getDateAt(todayStr, h, m);
+    const delay = fireMs - Date.now();
+    if (delay > 0) {
+      const label = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+      setTimeout(() => runProactive(label), delay);
+      console.log(`Proactive check scheduled at ${label}`);
+    }
+  }
 }
 
 // ── Evening check ─────────────────────────────────────────────────────────────
