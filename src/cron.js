@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const db   = require('./db');
-const { getMalaysiaHour, getMalaysiaDateStr, nowContext, getTodayStr } = require('./utils/time');
+const { getMalaysiaHour, getMalaysiaDateStr, nowContext, getTodayStr, getTomorrowStr } = require('./utils/time');
 
 let _bot = null;
 const _onceTimers = new Map(); // key → timeout
@@ -163,40 +163,68 @@ async function runGCalSync() {
   const notion = require('./notion');
   const { scheduleTimedPlanReminders } = require('./handlers/plans');
   const { getDateAt } = require('./utils/time');
-  const todayStr = getMalaysiaDateStr();
+  const todayStr    = getMalaysiaDateStr();
+  const tomorrowStr = getTomorrowStr();
+  const dayAfterStr = (() => {
+    const [y, m, d] = tomorrowStr.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().split('T')[0];
+  })();
+  const datesToSync = [todayStr, tomorrowStr, dayAfterStr];
 
   for (const chatId of db.getAllChatIds()) {
     const state = db.getState(chatId);
-    if (state.status !== 'awake') continue;
-    try {
-      const events = await gcal.getEventsForDate(todayStr).catch(() => []);
-      const existing = new Set(db.getPendingTimed(chatId, todayStr).map(p => p.plan_text.toLowerCase()));
-      for (const event of events) {
-        if (!event.time || event.allDay) continue;
-        if (existing.has(event.title.toLowerCase())) continue;
 
-        const planId = db.savePlan(chatId, { text: event.title, date: todayStr, time: event.time });
-        const [h, m] = event.time.split(':').map(Number);
-        const eventMs = getDateAt(todayStr, h, m);
-        const minsUntil = (eventMs - Date.now()) / 60000;
-        const reminderMs = eventMs - 30 * 60 * 1000;
+    // GCal → DB: import GCal events missing from DB (today + next 2 days)
+    for (const dateStr of datesToSync) {
+      try {
+        const events = await gcal.getEventsForDate(dateStr).catch(() => []);
+        const existing = new Set(db.getPendingTimed(chatId, dateStr).map(p => p.plan_text.toLowerCase()));
+        for (const event of events) {
+          if (!event.time || event.allDay) continue;
+          if (existing.has(event.title.toLowerCase())) continue;
 
-        if (reminderMs > Date.now()) {
-          scheduleTimedPlanReminders(chatId, planId, { title: event.title, date: todayStr, time: event.time });
-        } else if (minsUntil > 0 && minsUntil <= 60) {
-          _bot?.sendMessage(chatId, `heads up: ${event.title} at ${event.time} (in ${Math.round(minsUntil)} min)`).catch(() => {});
+          const planId = db.savePlan(chatId, { text: event.title, date: dateStr, time: event.time });
+          db.setPlanGCalId(planId, event.id);
+          const [h, m] = event.time.split(':').map(Number);
+          const eventMs = getDateAt(dateStr, h, m);
+          const minsUntil = (eventMs - Date.now()) / 60000;
+          const reminderMs = eventMs - 30 * 60 * 1000;
+
+          if (reminderMs > Date.now()) {
+            scheduleTimedPlanReminders(chatId, planId, { title: event.title, date: dateStr, time: event.time });
+          } else if (dateStr === todayStr && minsUntil > 0 && minsUntil <= 60) {
+            _bot?.sendMessage(chatId, `heads up: ${event.title} at ${event.time} (in ${Math.round(minsUntil)} min)`).catch(() => {});
+          }
+
+          try {
+            const notionPage = await notion.createPlanEntry({ title: event.title, date: dateStr, time: event.time });
+            if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
+          } catch (err) { console.error('GCal→Notion sync error:', err.message); }
+
+          console.log(`GCal sync: picked up "${event.title}" at ${event.time} on ${dateStr}`);
         }
-
-        // Write to Notion if not already there
-        try {
-          const notionPage = await notion.createPlanEntry({ title: event.title, date: todayStr, time: event.time });
-          if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
-        } catch (err) { console.error('GCal→Notion sync error:', err.message); }
-
-        console.log(`GCal sync: picked up "${event.title}" at ${event.time}`);
+      } catch (e) {
+        console.error(`GCal sync error for ${dateStr}:`, e.message);
       }
-    } catch (e) {
-      console.error('GCal sync error:', e.message);
+    }
+
+    // DB → GCal: create GCal events for DB plans missing from GCal (today + next 2 days)
+    if (state.status === 'awake') {
+      for (const dateStr of datesToSync) {
+        try {
+          const plans = db.getPendingTimed(chatId, dateStr).filter(p => !p.calendar_event_created && !p.gcal_event_id);
+          for (const plan of plans) {
+            try {
+              const ev = await gcal.createEvent({ title: plan.plan_text, date: dateStr, time: plan.plan_time, guests: [] });
+              db.setPlanCalendar(plan.id);
+              if (ev?.id) db.setPlanGCalId(plan.id, ev.id);
+              console.log(`DB→GCal: created event "${plan.plan_text}" on ${dateStr}`);
+            } catch (err) { console.error(`DB→GCal error for "${plan.plan_text}":`, err.message); }
+          }
+        } catch (e) {
+          console.error(`DB→GCal sync error for ${dateStr}:`, e.message);
+        }
+      }
     }
   }
 }
