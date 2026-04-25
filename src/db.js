@@ -91,8 +91,8 @@ const stmts = {
   markPlanReminded: db.prepare("UPDATE plans SET status='reminded',last_reminded=datetime('now') WHERE id=?"),
   setPlanNotionId: db.prepare("UPDATE plans SET notion_page_id=? WHERE id=?"),
   setPlanCalendar: db.prepare("UPDATE plans SET calendar_event_created=1 WHERE id=?"),
-  getPlanByNotionId:  db.prepare("SELECT id FROM plans WHERE notion_page_id=? AND status NOT IN ('done','skipped') LIMIT 1"),
-  getPlanByTitleDate: db.prepare("SELECT id FROM plans WHERE chat_id=? AND plan_text=? AND plan_date=? AND status NOT IN ('done','skipped') LIMIT 1"),
+  getPlanByNotionId:  db.prepare("SELECT id FROM plans WHERE notion_page_id=? LIMIT 1"),
+  getPlanByTitleDate: db.prepare("SELECT id FROM plans WHERE chat_id=? AND plan_text=? AND plan_date=? LIMIT 1"),
   getLastPending: db.prepare("SELECT * FROM plans WHERE chat_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1"),
   getAllPending: db.prepare("SELECT * FROM plans WHERE chat_id=? AND status NOT IN ('done','skipped') ORDER BY plan_date,plan_time"),
 
