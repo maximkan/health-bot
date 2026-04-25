@@ -37,13 +37,15 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
 }
 
 async function processQuality(bot, chatId, quality, wakeData) {
-  const { sleepH, bedMs, newDayStart, hasBed } = wakeData;
+  const { sleepH, bedMs, newDayStart, hasBed, prevDayStart } = wakeData;
 
   // Only log sleep if we actually know the bed time
   if (hasBed && sleepH != null) {
     try {
       const OFFSET_MS = 8 * 60 * 60 * 1000;
-      const bedDateStr = new Date(bedMs + OFFSET_MS).toISOString().split('T')[0];
+      // Use activity day start date as the label ("Night of April 24" not the calendar bed date)
+      const activityDayStart = prevDayStart || bedMs;
+      const bedDateStr = new Date(activityDayStart + OFFSET_MS).toISOString().split('T')[0];
       await notion.createSleepEntry({
         bed_time:    tsToTimeStr(bedMs),
         wake_time:   tsToTimeStr(newDayStart),
