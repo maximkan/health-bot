@@ -9,6 +9,19 @@ const db = new Database(DB_PATH);
 const notion = new Client({ auth: process.env.NOTION_TOKEN });
 const NOTION_DB = process.env.NOTION_KNOWN_FOODS_DS;
 
+db.exec(`CREATE TABLE IF NOT EXISTS known_foods (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  serving TEXT,
+  calories INTEGER DEFAULT 0,
+  protein REAL DEFAULT 0,
+  carbs REAL DEFAULT 0,
+  fat REAL DEFAULT 0,
+  day_of_week TEXT,
+  notes TEXT,
+  source TEXT DEFAULT 'User Logged'
+)`);
+
 const upsert = db.prepare(`INSERT INTO known_foods (name,serving,calories,protein,carbs,fat,day_of_week,notes,source)
   VALUES (?,?,?,?,?,?,?,?,?)
   ON CONFLICT(name) DO UPDATE SET serving=excluded.serving,calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,day_of_week=excluded.day_of_week,notes=excluded.notes,source=excluded.source`);
