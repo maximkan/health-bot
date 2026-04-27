@@ -111,9 +111,8 @@ async function handleBedTime(bot, chatId, state) {
   try {
     const dateStr     = getMalaysiaDateStr();
     const dayData     = await notion.getDayData(dayStart);
-    let targetsCtx = '';
-    try { targetsCtx = await notion.getTargetsText(); } catch {}
-    const targets     = await notion.getTargets().catch(() => null);
+    const targetsCtx  = notion.getTargetsText();
+    const targets     = notion.getTargets();
     const summaryText = stripMarkdown(await claude.generateDaySummary(dayData, targetsCtx));
 
     await notion.createDailySummaryPage(dayData, summaryText, dateStr, targets).catch(err => console.error('Summary page error:', err.message));
@@ -164,8 +163,7 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
       notion.getDrinkEntries(dayStartMs).catch(() => []),
     ]);
 
-    let targetsCtx = '';
-    try { targetsCtx = await notion.getTargetsText(); } catch {}
+    const targetsCtx = notion.getTargetsText();
 
     // Today's pending plans
     const todayStr  = getMalaysiaDateStr();

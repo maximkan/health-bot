@@ -384,6 +384,25 @@ async function parseTargetUpdate(text) {
   return parseJSON(response.content[0].text);
 }
 
+async function recalculateTargets(currentTargets, userInstruction) {
+  const prompt = `Current nutrition targets:
+Calories: ${currentTargets.calories} kcal
+Protein: ${currentTargets.protein}g
+Carbs: ${currentTargets.carbs}g
+Fat: ${currentTargets.fat}g
+Body weight: ${currentTargets.weight_kg}kg, goal: ${currentTargets.goal_weight}kg
+
+User wants to change: "${userInstruction}"
+
+Recalculate all four macros so they stay coherent and add up to the target calories (protein: 4 kcal/g, carbs: 4 kcal/g, fat: 9 kcal/g). Keep the same diet approach (high protein, low carb). Return ONLY JSON: {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}`;
+  const response = await anthropic.messages.create({
+    model: SONNET, max_tokens: 128,
+    system: 'You are a nutrition target calculator. Apply the requested change and recalculate all macros to stay coherent. Return only JSON.',
+    messages: [{ role: 'user', content: prompt }],
+  });
+  return parseJSON(response.content[0].text);
+}
+
 // ── Coach system prompt ───────────────────────────────────────────────────────
 
 function buildCoachSystem(targetsContext = '') {
@@ -562,7 +581,7 @@ async function analyzeGolfPhoto(photoBase64, caption) {
 
 module.exports = {
   classify,
-  analyzeMeal, applyMealCorrection, parseTargetUpdate,
+  analyzeMeal, applyMealCorrection, parseTargetUpdate, recalculateTargets,
   parseWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseBody,
   parsePlans, parseTimeCorrection, parseCorrection,
   askCoach, askWithPhoto, continueCoachReply,

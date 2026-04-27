@@ -84,9 +84,9 @@ async function runAutoBed() {
     try {
       const dayData     = await notion.getDayData(state.current_day_start).catch(() => null);
       let targetsCtx = '';
-      try { targetsCtx = await notion.getTargetsText(); } catch {}
+      targetsCtx = notion.getTargetsText();
       const summaryText = dayData ? await claude.generateDaySummary(dayData, targetsCtx) : 'No data for today.';
-      const targets     = await notion.getTargets().catch(() => null);
+      const targets     = notion.getTargets();
       if (dayData) await notion.createDailySummaryPage(dayData, summaryText, getMalaysiaDateStr(), targets).catch(() => {});
       db.setState(chatId, { status: 'sleeping', bed_nudge_sent: 0 });
       await _bot.sendMessage(chatId, summaryText + '\n\n(auto-closed — you clearly fell asleep 😴)');
@@ -130,9 +130,8 @@ async function runProactive(timeLabel) {
       const noMeals  = dayData.meals.length === 0 && hoursAwake >= 4;
       const lastLog  = noMeals ? null : 'recent';
 
-      let targetsCtx = '';
-      try { targetsCtx = await notion.getTargetsText(); } catch {}
-      const targets = await notion.getTargets().catch(() => ({ calories: 1600, protein: 220, carbs: 80, fat: 53 }));
+      const targetsCtx = notion.getTargetsText();
+      const targets = notion.getTargets();
 
       const recentData = {
         time: timeLabel,

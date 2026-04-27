@@ -624,13 +624,13 @@ function scheduleWeeklyReminders(bot, chatId) {
 async function handleUpdateTargets(bot, msg, chatId) {
   await bot.sendChatAction(chatId, 'typing');
   try {
-    const updates = await claude.parseTargetUpdate(msg.text || '');
-    if (!updates) { await bot.sendMessage(chatId, "couldn't parse that. try: 'set calorie target to 1800'"); return; }
-    const changed = Object.entries(updates).filter(([, v]) => v != null);
-    if (!changed.length) { await bot.sendMessage(chatId, "no targets found. try: 'set protein to 200g'"); return; }
-    await notion.updateTargets(updates);
-    const lines = changed.map(([k, v]) => `${k}: ${v}${k === 'calories' ? ' kcal' : 'g'}`);
-    await bot.sendMessage(chatId, `✅ targets updated:\n${lines.join('\n')}`);
+    const current = notion.getTargets();
+    const newTargets = await claude.recalculateTargets(current, msg.text || '');
+    if (!newTargets || !newTargets.calories) { await bot.sendMessage(chatId, "couldn't figure that out. try: 'change calories to 1800'"); return; }
+    await notion.updateTargets(newTargets);
+    await bot.sendMessage(chatId,
+      `✅ targets updated:\n${newTargets.calories} kcal · ${newTargets.protein}g P · ${newTargets.carbs}g C · ${newTargets.fat}g F`
+    );
   } catch (err) {
     console.error('Update targets error:', err.message);
     await bot.sendMessage(chatId, '❌ Failed to update targets. Try again.');
@@ -647,8 +647,7 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     const now = Date.now();
     const weekStartMs = now - 7 * 24 * 3600 * 1000;
     const weekData = await notion.getWeekData(weekStartMs).catch(() => ({}));
-    let targetsCtx = '';
-    try { targetsCtx = await notion.getTargetsText(); } catch {}
+    const targetsCtx = notion.getTargetsText();
 
     const review = await claude.generateWeeklyReview(weekData, targetsCtx);
     const sent = await bot.sendMessage(chatId, review);

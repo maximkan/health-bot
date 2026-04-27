@@ -62,7 +62,7 @@ async function handleAsk(bot, msg, context = '') {
 
   try {
     let targetsCtx = '';
-    try { targetsCtx = await notion.getTargetsText(); } catch {}
+    try { targetsCtx = notion.getTargetsText(); } catch {}
 
     const dayCtx = await buildDayContext(chatId);
     const notionCtx = context ? `${dayCtx}\n${context}` : dayCtx;
@@ -116,7 +116,7 @@ async function handleCoachReply(bot, msg, coachMessageId) {
     db.saveCoachMessage(chatId, 'user', msg.text || '', coachMessageId);
 
     let targetsCtx = '';
-    try { targetsCtx = await notion.getTargetsText(); } catch {}
+    try { targetsCtx = notion.getTargetsText(); } catch {}
 
     const answer = stripMarkdown(await claude.continueCoachReply(messages, targetsCtx));
     const sent = await bot.sendMessage(chatId, answer);
@@ -133,7 +133,7 @@ async function handlePhotoQuestion(bot, msg, photoBase64) {
   await bot.sendChatAction(chatId, 'typing');
   try {
     let targetsCtx = '';
-    try { targetsCtx = await notion.getTargetsText(); } catch {}
+    try { targetsCtx = notion.getTargetsText(); } catch {}
     const answer = stripMarkdown(await claude.askWithPhoto(photoBase64, msg.caption || 'What can you tell me about this?', targetsCtx));
     await bot.sendMessage(chatId, answer);
   } catch (err) {

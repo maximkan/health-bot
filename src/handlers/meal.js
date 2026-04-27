@@ -84,7 +84,7 @@ async function logMeal(bot, chatId, data, dayStart) {
     let totals  = null;
     let targets = null;
     try { totals  = await notion.getDailyMealTotals(dayStart); } catch {}
-    try { targets = await notion.getTargets(); } catch {}
+    try { targets = notion.getTargets(); } catch {}
 
     await bot.sendMessage(chatId, formatConfirmation(data, totals, targets));
   } catch (err) {

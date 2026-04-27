@@ -200,7 +200,78 @@ const getPendingReminders  = () => stmts.getPendingReminders.all(Date.now());
 const markReminderFired    = (id) => stmts.markReminderFired.run(id);
 const cleanOldReminders    = () => stmts.cleanOldReminders.run(Date.now() - 7 * 24 * 3600 * 1000);
 
-// ── Golf messages ─────────────────────────────────────────────────────────────
+// ── Known foods ───────────────────────────────────────────────────────────────
+
+db.exec(`CREATE TABLE IF NOT EXISTS known_foods (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  serving TEXT,
+  calories INTEGER DEFAULT 0,
+  protein REAL DEFAULT 0,
+  carbs REAL DEFAULT 0,
+  fat REAL DEFAULT 0,
+  day_of_week TEXT,
+  notes TEXT,
+  source TEXT DEFAULT 'User Logged'
+)`);
+
+const _upsertFood  = db.prepare(`INSERT INTO known_foods (name,serving,calories,protein,carbs,fat,day_of_week,notes,source)
+  VALUES (?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(name) DO UPDATE SET serving=excluded.serving,calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,day_of_week=excluded.day_of_week,notes=excluded.notes,source=excluded.source`);
+const _foodExists  = db.prepare('SELECT id FROM known_foods WHERE name=? LIMIT 1');
+const _getFoods    = db.prepare(`SELECT * FROM known_foods WHERE (day_of_week=? OR day_of_week IS NULL OR day_of_week='') AND NOT (? AND notes LIKE 'Lunch Odd Week%') AND NOT (? AND notes LIKE 'Lunch Even Week%')`);
+const _getFoodsAll = db.prepare('SELECT * FROM known_foods');
+const _clearFoods  = db.prepare('DELETE FROM known_foods');
+
+function upsertKnownFood({ name, serving = '1 serving', calories = 0, protein = 0, carbs = 0, fat = 0, day_of_week = null, notes = '', source = 'User Logged' }) {
+  _upsertFood.run(name, serving, Math.round(calories), protein, carbs, fat, day_of_week || null, notes || '', source);
+}
+
+function knownFoodExists(name) { return !!_foodExists.get(name); }
+
+function getKnownFoodsForDay(dayOfWeek, weekType) {
+  const isEven = weekType === 'even';
+  const isOdd  = weekType === 'odd';
+  return _getFoods.all(dayOfWeek, isEven ? 1 : 0, isOdd ? 1 : 0);
+}
+
+function getAllKnownFoods() { return _getFoodsAll.all(); }
+function clearKnownFoods()  { _clearFoods.run(); }
+
+// ── Targets ───────────────────────────────────────────────────────────────────
+
+db.exec(`CREATE TABLE IF NOT EXISTS targets (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  calories INTEGER DEFAULT 1600,
+  protein REAL DEFAULT 220,
+  carbs REAL DEFAULT 80,
+  fat REAL DEFAULT 53,
+  weight_kg REAL DEFAULT 105,
+  goal_weight REAL DEFAULT 80
+)`);
+// Seed default row if empty
+const _targetsRow = db.prepare('SELECT * FROM targets WHERE id=1').get();
+if (!_targetsRow) db.prepare("INSERT INTO targets (id,calories,protein,carbs,fat,weight_kg,goal_weight) VALUES (1,1600,220,80,53,105,80)").run();
+
+const _getTargets    = db.prepare('SELECT * FROM targets WHERE id=1');
+const _updateTargets = db.prepare(`INSERT INTO targets (id,calories,protein,carbs,fat,weight_kg,goal_weight) VALUES (1,?,?,?,?,?,?)
+  ON CONFLICT(id) DO UPDATE SET calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,weight_kg=excluded.weight_kg,goal_weight=excluded.goal_weight`);
+
+function getTargetsFromDb() {
+  return _getTargets.get() ?? { calories: 1600, protein: 220, carbs: 80, fat: 53, weight_kg: 105, goal_weight: 80 };
+}
+
+function setTargetsInDb(t) {
+  const cur = getTargetsFromDb();
+  _updateTargets.run(
+    t.calories   ?? cur.calories,
+    t.protein    ?? cur.protein,
+    t.carbs      ?? cur.carbs,
+    t.fat        ?? cur.fat,
+    t.weight_kg  ?? cur.weight_kg,
+    t.goal_weight ?? cur.goal_weight,
+  );
+}
 
 // ── Chat history (for classifier context) ────────────────────────────────────
 
@@ -248,4 +319,6 @@ module.exports = {
   saveHistory, getHistory,
   saveGolfMessage, getGolfHistory, getGolfMessageCount,
   deleteOldGolfMessages, clearGolfHistory, replaceGolfHistory,
+  upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKnownFoods,
+  getTargetsFromDb, setTargetsInDb,
 };

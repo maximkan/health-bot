@@ -51,47 +51,32 @@ function progressBar(value, max, unit = '') {
 
 function qualityStars(n) { return '★'.repeat(n) + '☆'.repeat(5 - n); }
 
-// ── Targets cache ─────────────────────────────────────────────────────────────
+// ── Targets — SQLite primary, Notion mirror ───────────────────────────────────
 
-const DEFAULT_TARGETS = { calories: 1600, protein: 220, carbs: 80, fat: 53, weight_kg: 105, goal_weight: 80 };
-let _targetsCache = null;
-let _targetsFetched = 0;
-
-async function getTargets() {
-  if (_targetsCache && Date.now() - _targetsFetched < 3600000) return _targetsCache;
-  try {
-    const page = await notion.pages.retrieve({ page_id: config.notion.pages.targets });
-    const p = page.properties ?? {};
-    // Try to extract properties from the targets page
-    const cal  = p['Calories']?.number ?? p['Calorie Target']?.number ?? DEFAULT_TARGETS.calories;
-    const prot = p['Protein']?.number  ?? p['Protein Target']?.number ?? DEFAULT_TARGETS.protein;
-    const carb = p['Carbs']?.number    ?? DEFAULT_TARGETS.carbs;
-    const fat  = p['Fat']?.number      ?? DEFAULT_TARGETS.fat;
-    const wt   = p['Current Weight']?.number ?? p['Weight']?.number ?? DEFAULT_TARGETS.weight_kg;
-    const goal = p['Goal Weight']?.number ?? DEFAULT_TARGETS.goal_weight;
-    _targetsCache = { calories: cal, protein: prot, carbs: carb, fat: fat, weight_kg: wt, goal_weight: goal };
-  } catch {
-    _targetsCache = DEFAULT_TARGETS;
-  }
-  _targetsFetched = Date.now();
-  return _targetsCache;
+function getTargets() {
+  const db = require('./db');
+  return db.getTargetsFromDb();
 }
 
-async function getTargetsText() {
-  const t = await getTargets();
+function getTargetsText() {
+  const t = getTargets();
   return `Current weight: ~${t.weight_kg}kg, goal: ${t.goal_weight}kg\nDaily targets: ${t.calories} kcal / ${t.protein}g protein / ${t.carbs}g carbs / ${t.fat}g fat`;
 }
 
 async function updateTargets(updates) {
-  if (!config.notion.pages.targets) return;
-  const props = {};
-  if (updates.calories != null)  props['Calories'] = { number: updates.calories };
-  if (updates.protein != null)   props['Protein']  = { number: updates.protein };
-  if (updates.carbs != null)     props['Carbs']    = { number: updates.carbs };
-  if (updates.fat != null)       props['Fat']      = { number: updates.fat };
-  if (!Object.keys(props).length) return;
-  await enqueue(() => notion.pages.update({ page_id: config.notion.pages.targets, properties: props }));
-  _targetsCache = null; // bust cache
+  const db = require('./db');
+  db.setTargetsInDb(updates);
+  // Mirror to Notion
+  if (config.notion.pages.targets) {
+    const props = {};
+    if (updates.calories != null) props['Calories'] = { number: updates.calories };
+    if (updates.protein  != null) props['Protein']  = { number: updates.protein };
+    if (updates.carbs    != null) props['Carbs']    = { number: updates.carbs };
+    if (updates.fat      != null) props['Fat']      = { number: updates.fat };
+    if (Object.keys(props).length) {
+      enqueue(() => notion.pages.update({ page_id: config.notion.pages.targets, properties: props })).catch(() => {});
+    }
+  }
 }
 
 // ── Day range filter ──────────────────────────────────────────────────────────
@@ -537,47 +522,36 @@ async function deleteEntry(pageId) {
 
 // ── Known foods ───────────────────────────────────────────────────────────────
 
-async function getKnownFoodsContext(dayOfWeek, weekType) {
-  if (!config.notion.db.knownFoods) return '';
-  const dayFilter = { or: [{ property: 'Day of Week', rich_text: { equals: dayOfWeek } }, { property: 'Day of Week', rich_text: { is_empty: true } }] };
-  let filter = dayFilter;
-  if (weekType) {
-    const other = weekType === 'even' ? 'Odd' : 'Even';
-    filter = { and: [dayFilter, { property: 'Notes', rich_text: { does_not_contain: `Lunch ${other} Week` } }] };
-  }
-  const res = await notion.databases.query({ database_id: config.notion.db.knownFoods, filter }).catch(() => ({ results: [] }));
-  return res.results.map(page => {
-    const p = page.properties;
-    return `${p['Food Name']?.title?.[0]?.text?.content ?? ''} (${p['Serving Size']?.rich_text?.[0]?.text?.content ?? ''}): ${p['Calories']?.number ?? 0} kcal, ${p['Protein (g)']?.number ?? 0}g P, ${p['Carbs (g)']?.number ?? 0}g C, ${p['Fat (g)']?.number ?? 0}g F`;
-  }).join('\n');
+function getKnownFoodsContext(dayOfWeek, weekType) {
+  const db = require('./db');
+  const foods = db.getKnownFoodsForDay(dayOfWeek, weekType);
+  return foods.map(f => `${f.name} (${f.serving}): ${f.calories} kcal, ${f.protein}g P, ${f.carbs}g C, ${f.fat}g F`).join('\n');
 }
 
 async function addKnownFood(data) {
-  if (!config.notion.db.knownFoods) return;
   const name = data.meal_name;
   if (!name) return;
-  // Skip NS cafeteria items — they're already in the DB from the spreadsheet
   if (name.includes('[Dinner') || name.includes('[Lunch') || name.includes('[NS Cafe]')) return;
-  // Check if already exists
-  const existing = await notion.databases.query({
-    database_id: config.notion.db.knownFoods,
-    filter: { property: 'Food Name', title: { equals: name } },
-    page_size: 1,
-  }).catch(() => ({ results: [] }));
-  if (existing.results.length) return;
-  await enqueue(() => notion.pages.create({
-    parent: { database_id: config.notion.db.knownFoods },
-    properties: {
-      'Food Name': { title: rt(name) },
-      'Source':    { select: { name: 'User Logged' } },
-      'Serving Size': { rich_text: rt('1 serving') },
-      'Calories':   { number: Math.round(data.totals?.calories ?? 0) },
-      'Protein (g)':{ number: Math.round(data.totals?.protein  ?? 0) },
-      'Carbs (g)':  { number: Math.round(data.totals?.carbs    ?? 0) },
-      'Fat (g)':    { number: Math.round(data.totals?.fat      ?? 0) },
-      'Notes':      { rich_text: rt('Auto-saved') },
-    },
-  }));
+  const db = require('./db');
+  if (db.knownFoodExists(name)) return;
+  // SQLite first
+  db.upsertKnownFood({ name, serving: '1 serving', calories: data.totals?.calories ?? 0, protein: data.totals?.protein ?? 0, carbs: data.totals?.carbs ?? 0, fat: data.totals?.fat ?? 0, notes: 'Auto-saved', source: 'User Logged' });
+  // Mirror to Notion
+  if (config.notion.db.knownFoods) {
+    enqueue(() => notion.pages.create({
+      parent: { database_id: config.notion.db.knownFoods },
+      properties: {
+        'Food Name':    { title: rt(name) },
+        'Source':       { select: { name: 'User Logged' } },
+        'Serving Size': { rich_text: rt('1 serving') },
+        'Calories':     { number: Math.round(data.totals?.calories ?? 0) },
+        'Protein (g)':  { number: Math.round(data.totals?.protein  ?? 0) },
+        'Carbs (g)':    { number: Math.round(data.totals?.carbs    ?? 0) },
+        'Fat (g)':      { number: Math.round(data.totals?.fat      ?? 0) },
+        'Notes':        { rich_text: rt('Auto-saved') },
+      },
+    })).catch(() => {});
+  }
 }
 
 // ── Coach Notes ───────────────────────────────────────────────────────────────
