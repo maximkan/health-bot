@@ -82,6 +82,18 @@ async function getTargetsText() {
   return `Current weight: ~${t.weight_kg}kg, goal: ${t.goal_weight}kg\nDaily targets: ${t.calories} kcal / ${t.protein}g protein / ${t.carbs}g carbs / ${t.fat}g fat`;
 }
 
+async function updateTargets(updates) {
+  if (!config.notion.pages.targets) return;
+  const props = {};
+  if (updates.calories != null)  props['Calories'] = { number: updates.calories };
+  if (updates.protein != null)   props['Protein']  = { number: updates.protein };
+  if (updates.carbs != null)     props['Carbs']    = { number: updates.carbs };
+  if (updates.fat != null)       props['Fat']      = { number: updates.fat };
+  if (!Object.keys(props).length) return;
+  await enqueue(() => notion.pages.update({ page_id: config.notion.pages.targets, properties: props }));
+  _targetsCache = null; // bust cache
+}
+
 // ── Day range filter ──────────────────────────────────────────────────────────
 
 function dayRangeFilter(dayStartMs) {
@@ -540,6 +552,34 @@ async function getKnownFoodsContext(dayOfWeek, weekType) {
   }).join('\n');
 }
 
+async function addKnownFood(data) {
+  if (!config.notion.db.knownFoods) return;
+  const name = data.meal_name;
+  if (!name) return;
+  // Skip NS cafeteria items — they're already in the DB from the spreadsheet
+  if (name.includes('[Dinner') || name.includes('[Lunch') || name.includes('[NS Cafe]')) return;
+  // Check if already exists
+  const existing = await notion.databases.query({
+    database_id: config.notion.db.knownFoods,
+    filter: { property: 'Food Name', title: { equals: name } },
+    page_size: 1,
+  }).catch(() => ({ results: [] }));
+  if (existing.results.length) return;
+  await enqueue(() => notion.pages.create({
+    parent: { database_id: config.notion.db.knownFoods },
+    properties: {
+      'Food Name': { title: rt(name) },
+      'Source':    { select: { name: 'User Logged' } },
+      'Serving Size': { rich_text: rt('1 serving') },
+      'Calories':   { number: Math.round(data.totals?.calories ?? 0) },
+      'Protein (g)':{ number: Math.round(data.totals?.protein  ?? 0) },
+      'Carbs (g)':  { number: Math.round(data.totals?.carbs    ?? 0) },
+      'Fat (g)':    { number: Math.round(data.totals?.fat      ?? 0) },
+      'Notes':      { rich_text: rt('Auto-saved') },
+    },
+  }));
+}
+
 // ── Coach Notes ───────────────────────────────────────────────────────────────
 
 async function createDailySummaryPage(dayData, summaryText, dateStr, targets) {
@@ -655,12 +695,12 @@ async function getAllBodyMeasurements() {
 }
 
 module.exports = {
-  getTargets, getTargetsText,
+  getTargets, getTargetsText, updateTargets,
   createMealEntry, createWorkoutEntry, updateWorkoutEntry, createRecoveryEntry, createSleepEntry, createBodyEntry,
   createPlanEntry, updatePlanStatusNotion, getPlansForDate,
   createGolfEntry, getGolfHistory, getGolfHubContent,
   getDailyMealTotals, getDrinkEntries, getEntriesForDay, getDayData, getTodayEntries,
-  deleteEntry, getLastBodyMeasurement, getKnownFoodsContext,
+  deleteEntry, getLastBodyMeasurement, getKnownFoodsContext, addKnownFood,
   createDailySummaryPage, createCoachNote, correctEntryTime,
   getWeekData, getAllBodyMeasurements,
 };

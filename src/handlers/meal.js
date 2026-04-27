@@ -77,6 +77,8 @@ async function logMeal(bot, chatId, data, dayStart) {
     await notion.createMealEntry(data);
     const caffeineMg = data.caffeine_mg ?? 0;
     if (caffeineMg > 0) db.addCaffeine(chatId, caffeineMg);
+    // Auto-save non-retroactive meals to known foods (fire-and-forget)
+    if (!data.date) notion.addKnownFood(data).catch(() => {});
 
     console.log(`logMeal dayStart=${dayStart} (${dayStart ? new Date(dayStart).toISOString() : 'null'})`);
     let totals  = null;

@@ -14,19 +14,22 @@ function getISOWeek() {
 }
 
 function getCurrentWeekType() {
-  if (!fs.existsSync(CONFIG_FILE)) return null;
+  const isoWeek = getISOWeek();
+  const natural = isoWeek % 2 === 1 ? 'odd' : 'even';
+  if (!fs.existsSync(CONFIG_FILE)) return natural;
   try {
-    const { anchorType, anchorWeek } = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    const diff = getISOWeek() - anchorWeek;
-    return diff % 2 === 0 ? anchorType : (anchorType === 'odd' ? 'even' : 'odd');
+    const { flip } = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    return flip ? (natural === 'odd' ? 'even' : 'odd') : natural;
   } catch {
-    return null;
+    return natural;
   }
 }
 
 function setWeekType(type) {
+  const isoWeek = getISOWeek();
+  const natural = isoWeek % 2 === 1 ? 'odd' : 'even';
   fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ anchorType: type, anchorWeek: getISOWeek() }));
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify({ flip: natural !== type }));
 }
 
 module.exports = { getCurrentWeekType, setWeekType };

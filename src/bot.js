@@ -132,6 +132,7 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
       case 'PLAN':          await handlePlan(bot, msg);        break;
       case 'PLAN_DONE':     await handlePlanDone(bot, msg);    break;
       case 'PLAN_SKIP':     await handlePlanSkip(bot, msg);    break;
+      case 'UPDATE_TARGETS': await handleUpdateTargets(bot, msg, chatId); break;
       case 'WAKE':
         if (userState.status === 'sleeping') break; // handled by wake flow
         // deliberate fall-through
@@ -335,7 +336,8 @@ function startBot() {
     // ── Wake detection ────────────────────────────────────────────────────────
     if (userState.status === 'sleeping' && isWake) {
       pendingStates.delete(chatId);
-      db.setState(chatId, { bed_nudge_sent: 0, weekly_waiting_weight: 0 });
+      const isMonday = new Date(Date.now() + 8 * 3600 * 1000).getUTCDay() === 1;
+      db.setState(chatId, { bed_nudge_sent: 0, weekly_waiting_weight: isMonday ? 1 : 0 });
       const wakeOverride = extractTimeMs(msg.text);
       const wakeData = await day.handleMorningWake(bot, chatId, userState, wakeOverride);
       pendingStates.set(chatId, { type: 'morning_quality', wakeData, pendingMsg: msg, pendingIntents: earlyIntents });
@@ -367,6 +369,11 @@ function startBot() {
           return;
         }
         await day.processQuality(bot, chatId, quality, state.wakeData);
+        const curStateAfter = db.getState(chatId);
+        if (curStateAfter.weekly_waiting_weight) {
+          await bot.sendMessage(chatId, '📋 it\'s monday — log your weight + body fat for the weekly review.');
+          scheduleWeeklyReminders(bot, chatId);
+        }
         const LOG_TYPES = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','PLAN'];
         const hasLogs = state.pendingIntents?.some(i => LOG_TYPES.includes(i));
         if (state.pendingMsg && hasLogs) {
@@ -391,6 +398,11 @@ function startBot() {
         }
         pendingStates.delete(chatId);
         await day.processQuality(bot, chatId, state.quality, wakeData);
+        const curStateAfter = db.getState(chatId);
+        if (curStateAfter.weekly_waiting_weight) {
+          await bot.sendMessage(chatId, '📋 it\'s monday — log your weight + body fat for the weekly review.');
+          scheduleWeeklyReminders(bot, chatId);
+        }
         const LOG_TYPES = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','PLAN'];
         const hasLogs = state.pendingIntents?.some(i => LOG_TYPES.includes(i));
         if (state.pendingMsg && hasLogs) {
@@ -427,7 +439,10 @@ function startBot() {
 
       if (state.type === 'workout_confirm') {
         const text = msg.text || '';
-        if (isCancellation(text)) {
+        const isWorkoutCancel = earlyIntents.length === 1 && earlyIntents[0] === 'GENERAL'
+          && text.trim().split(/\s+/).length <= 3
+          && /^(no|nope|cancel|skip|stop|abort|nevermind|never mind)$/i.test(text.trim());
+        if (isWorkoutCancel) {
           pendingStates.delete(chatId);
           await bot.sendMessage(chatId, '❌ Cancelled.');
           return;
@@ -495,8 +510,11 @@ function startBot() {
         const text = msg.text || '';
         const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
 
-        // Cancel only on explicit cancel words
-        if (isCancellation(text)) {
+        // Cancel only on standalone short cancel messages — never on sentences that start with "no"
+        const isExplicitCancel = earlyIntents.length === 1 && earlyIntents[0] === 'GENERAL'
+          && text.trim().split(/\s+/).length <= 3
+          && /^(no|nope|cancel|skip|stop|abort|nevermind|never mind)$/i.test(text.trim());
+        if (isExplicitCancel) {
           pendingStates.delete(chatId);
           await bot.sendMessage(chatId, '❌ Cancelled. Nothing logged.');
           if (state.catchupRetro) {
@@ -581,6 +599,42 @@ function startBot() {
   bot.on('polling_error', (err) => console.error('Polling error:', err.code, err.message));
 
   return bot;
+}
+
+// ── Weekly weight reminders ───────────────────────────────────────────────────
+
+function scheduleWeeklyReminders(bot, chatId) {
+  let attempt = 0;
+  const maxAttempts = 8; // 4 hours max (8 × 30 min)
+  function scheduleNext() {
+    if (attempt >= maxAttempts) return;
+    attempt++;
+    setTimeout(async () => {
+      const state = db.getState(chatId);
+      if (!state.weekly_waiting_weight) return; // already logged
+      await bot.sendMessage(chatId, '⚖️ still need your weekly weight. log it when ready.').catch(() => {});
+      scheduleNext();
+    }, 30 * 60 * 1000);
+  }
+  scheduleNext();
+}
+
+// ── Update targets ────────────────────────────────────────────────────────────
+
+async function handleUpdateTargets(bot, msg, chatId) {
+  await bot.sendChatAction(chatId, 'typing');
+  try {
+    const updates = await claude.parseTargetUpdate(msg.text || '');
+    if (!updates) { await bot.sendMessage(chatId, "couldn't parse that. try: 'set calorie target to 1800'"); return; }
+    const changed = Object.entries(updates).filter(([, v]) => v != null);
+    if (!changed.length) { await bot.sendMessage(chatId, "no targets found. try: 'set protein to 200g'"); return; }
+    await notion.updateTargets(updates);
+    const lines = changed.map(([k, v]) => `${k}: ${v}${k === 'calories' ? ' kcal' : 'g'}`);
+    await bot.sendMessage(chatId, `✅ targets updated:\n${lines.join('\n')}`);
+  } catch (err) {
+    console.error('Update targets error:', err.message);
+    await bot.sendMessage(chatId, '❌ Failed to update targets. Try again.');
+  }
 }
 
 // ── Weekly review flow ────────────────────────────────────────────────────────

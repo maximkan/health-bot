@@ -15,7 +15,7 @@ function init(bot) {
   cron.schedule('30 0  * * *', () => runBedNudge(1),   tz); // 12:30 AM
   cron.schedule('0  2  * * *', () => runBedNudge(2),   tz); // 2:00 AM
   cron.schedule('0  3  * * *', runAutoBed,             tz); // 3:00 AM
-  cron.schedule('0  8  * * 1', runWeeklyReview,        tz); // Monday 8 AM
+  // Weekly review triggered on Monday morning wake instead of fixed 8am cron
   cron.schedule('0  8  * * *', scheduleProactiveForDay, tz); // reschedule daily at 8am
   cron.schedule('0  */2 * * *', runUntimedReminders,   tz); // every 2 hrs
   cron.schedule('*/30 * * * *', runGCalSync,            tz); // every 30 min
@@ -126,8 +126,8 @@ async function runProactive(timeLabel) {
       const dayData  = await notion.getDayData(dayStart).catch(() => null);
       if (!dayData) continue;
 
-      const hourMYT  = getMalaysiaHour();
-      const noMeals  = dayData.meals.length === 0 && hourMYT >= 14;
+      const hoursAwake = dayStart ? (Date.now() - dayStart) / 3600000 : 0;
+      const noMeals  = dayData.meals.length === 0 && hoursAwake >= 4;
       const lastLog  = noMeals ? null : 'recent';
 
       let targetsCtx = '';

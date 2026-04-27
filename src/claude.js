@@ -32,6 +32,7 @@ Intents:
 - PLAN_SKIP: skipping or postponing a plan
 - CORRECTION: changing/fixing a previous log entry (time, values, etc.)
 - DELETE: deleting/removing a log entry ("delete my chicken rice", "remove today's lunch", "delete that workout")
+- UPDATE_TARGETS: changing daily nutrition targets ("change calorie target to 1800", "set protein to 200g", "update my macros")
 - COACH_QUESTION: asking a health, nutrition, or fitness question
 - GENERAL: greeting, thanks, anything else
 
@@ -63,7 +64,7 @@ async function classify(text, history = []) {
     if (!match) return ['GENERAL'];
     const arr = JSON.parse(match[0]);
     const VALID = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG',
-      'WEIGHT_LOG','BED','WAKE','PLAN','PLAN_DONE','PLAN_SKIP','CORRECTION','DELETE','COACH_QUESTION','GENERAL']);
+      'WEIGHT_LOG','BED','WAKE','PLAN','PLAN_DONE','PLAN_SKIP','CORRECTION','DELETE','UPDATE_TARGETS','COACH_QUESTION','GENERAL']);
     const filtered = arr.filter(i => VALID.has(i));
     return filtered.length ? filtered : ['GENERAL'];
   } catch { return ['GENERAL']; }
@@ -355,15 +356,32 @@ What should be corrected? Return ONLY JSON:
 // ── Meal correction ───────────────────────────────────────────────────────────
 
 async function applyMealCorrection(existingData, correction) {
-  const prompt = `Current meal data:\n${JSON.stringify(existingData, null, 2)}\n\nUser correction: "${correction}"\n\nApply the correction. Only change what was mentioned. Recalculate totals. Return the complete updated JSON with same structure.`;
+  const prompt = `Current meal data:\n${JSON.stringify(existingData, null, 2)}\n\nUser correction: "${correction}"\n\nApply the correction precisely:
+- If user says they DIDN'T have something, REMOVE those items from the items array entirely
+- If user says to change a quantity/weight, update that item's calories/macros proportionally
+- If user says to add something, add it as a new item with estimated macros
+- NEVER change meal_name unless explicitly asked
+- After ALL changes, recalculate totals.calories/protein/carbs/fat as the exact SUM of all remaining items
+- Return the complete updated JSON with the same structure`;
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 1024,
-    system: 'You are a meal data editor. Apply corrections to meal JSON. Return only valid JSON with same structure. Recalculate totals after any change.',
+    model: SONNET, max_tokens: 1024,
+    system: 'You are a meal data editor. Apply corrections to meal JSON precisely. When removing items, delete them from the items array. When changing amounts, scale the macros. Always recalculate totals as sum of items. Return only valid JSON with same structure.',
     messages: [{ role: 'user', content: prompt }],
   });
   const parsed = parseJSON(response.content[0].text);
   if (!parsed) throw new Error('Could not parse correction response');
   return parsed;
+}
+
+// ── Target update parsing ─────────────────────────────────────────────────────
+
+async function parseTargetUpdate(text) {
+  const response = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 128,
+    system: 'Parse a nutrition target update. Return ONLY JSON: {"calories": null, "protein": null, "carbs": null, "fat": null}. Set only the values explicitly mentioned, leave others null.',
+    messages: [{ role: 'user', content: text }],
+  });
+  return parseJSON(response.content[0].text);
 }
 
 // ── Coach system prompt ───────────────────────────────────────────────────────
@@ -470,7 +488,7 @@ async function generateFullAnalysis(allData, targetsContext = '') {
 async function checkProactivePatterns(recentData, targetsContext = '') {
   const response = await anthropic.messages.create({
     model: SONNET, max_tokens: 256, system: buildCoachSystem(targetsContext),
-    messages: [{ role: 'user', content: `Check for concerning patterns. Data:\n${JSON.stringify(recentData)}\n\nTriggers to check:\n- No food logged by 2 PM\n- Protein under target 3+ days\n- No workout 2+ days\n- Caffeine over 400mg today\n- Last caffeine after 5 PM\n- No logs 24+ hours\n- Calories over target 2+ days\n\nIf something is WRONG, respond with a single direct blunt message (1–2 sentences max). If everything looks fine, respond with exactly: "OK"\n\nReturn ONLY the message or "OK", nothing else.` }],
+    messages: [{ role: 'user', content: `Check for concerning patterns. Data:\n${JSON.stringify(recentData)}\n\nTriggers to check:\n- No food logged 4+ hours after waking up (noMealsYet: true)\n- Caffeine over 400mg today\n- Last caffeine after 5 PM\n- Calories over target\n\nIf something is WRONG, respond with a single direct blunt message (1–2 sentences max). If everything looks fine, respond with exactly: "OK"\n\nReturn ONLY the message or "OK", nothing else.` }],
   });
   const msg = response.content[0].text.trim();
   return msg === 'OK' ? null : msg;
@@ -544,7 +562,7 @@ async function analyzeGolfPhoto(photoBase64, caption) {
 
 module.exports = {
   classify,
-  analyzeMeal, applyMealCorrection,
+  analyzeMeal, applyMealCorrection, parseTargetUpdate,
   parseWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseBody,
   parsePlans, parseTimeCorrection, parseCorrection,
   askCoach, askWithPhoto, continueCoachReply,

@@ -93,8 +93,13 @@ async function processQuality(bot, chatId, quality, wakeData) {
   }
   if (tasks.length) lines.push(`📋 tasks:\n${tasks.map(p => `• ${p.plan_text}`).join('\n')}`);
 
-  if (lines.length) await bot.sendMessage(chatId, lines.join('\n\n'));
-  else await bot.sendMessage(chatId, 'no plans registered for today. enjoy your day.');
+  if (lines.length) {
+    const sleepNote = (hasBed && sleepH != null) ? `${fmtHours(sleepH)} sleep. ` : '';
+    await bot.sendMessage(chatId, `${sleepNote}here's your day:\n\n${lines.join('\n\n')}`);
+  } else {
+    const sleepNote = (hasBed && sleepH != null) ? `${fmtHours(sleepH)} sleep. ` : '';
+    await bot.sendMessage(chatId, `${sleepNote}no plans today. free day.`);
+  }
 }
 
 // ── Bed flow ──────────────────────────────────────────────────────────────────
