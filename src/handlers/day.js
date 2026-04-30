@@ -5,6 +5,7 @@ const db      = require('../db');
 const { getMalaysiaDateStr, tsToTimeStr, nowContext, getTomorrowStr, getTodayStr, getActivityTomorrowStr, extractTimeMs } = require('../utils/time');
 const { stripMarkdown } = require('./ask');
 const { scheduleTimedPlanReminders, syncNotionPlansToDb } = require('./plans');
+const { calculateTDEE, sumWorkoutCalories } = require('../utils/tdee');
 
 // ── Morning wake flow ─────────────────────────────────────────────────────────
 
@@ -18,8 +19,10 @@ function fmtHours(h) {
 
 async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
   const wakeMs   = wakeOverrideMs || Date.now();
-  const hasBed   = state.bed_time != null;
-  const bedMs    = hasBed ? state.bed_time : null;
+  const rawBedMs = state.bed_time;
+  // Stale bed_time guard: if >20h ago, the bed timestamp is from a previous night — ignore it
+  const hasBed   = rawBedMs != null && (wakeMs - rawBedMs) < 20 * 3600 * 1000;
+  const bedMs    = hasBed ? rawBedMs : null;
   const sleepH   = hasBed ? Math.round(Math.max(0, wakeMs - bedMs - 20 * 60 * 1000) / 3600000 * 10) / 10 : null;
   const sleepStr = sleepH != null ? fmtHours(sleepH) : null;
 
@@ -46,7 +49,8 @@ async function processQuality(bot, chatId, quality, wakeData) {
       // Use activity day start date as the label ("Night of April 24" not the calendar bed date)
       const activityDayStart = prevDayStart || bedMs;
       const bedDateStr = new Date(activityDayStart + OFFSET_MS).toISOString().split('T')[0];
-      await notion.createSleepEntry({
+      db.saveSleepLog(chatId, { bed_time: bedMs, wake_time: newDayStart, hours_slept: sleepH, quality, notes: '' });
+      await notion.createSleepEntry(chatId, {
         bed_time:    tsToTimeStr(bedMs),
         wake_time:   tsToTimeStr(newDayStart),
         hours_slept: sleepH,
@@ -64,7 +68,7 @@ async function processQuality(bot, chatId, quality, wakeData) {
   await syncNotionPlansToDb(chatId, todayStr).catch(() => {});
   const timedToday = db.getPendingTimed(chatId, todayStr);
   const tasks      = db.getPendingUntimed(chatId);
-  const gcalToday  = await gcal.getEventsForDate(todayStr).catch(() => []);
+  const gcalToday  = await gcal.getEventsForDate(chatId, todayStr).catch(() => []);
 
   const dbTitles = new Set(timedToday.map(p => p.plan_text.toLowerCase()));
   const gcalExtra = gcalToday.filter(e => !dbTitles.has(e.title.toLowerCase()) && !e.allDay);
@@ -110,10 +114,27 @@ async function handleBedTime(bot, chatId, state) {
 
   try {
     const dateStr     = getMalaysiaDateStr();
-    const dayData     = await notion.getDayData(dayStart);
-    const targetsCtx  = notion.getTargetsText();
-    const targets     = notion.getTargets();
-    const summaryText = stripMarkdown(await claude.generateDaySummary(dayData, targetsCtx));
+    const dayData     = await notion.getDayData(chatId, dayStart);
+    const targetsCtx  = notion.getTargetsText(chatId);
+    const targets     = notion.getTargets(chatId);
+
+    // TDEE / deficit calculation
+    const t = targets;
+    let tdeeCtx = null;
+    try {
+      const weekData = await notion.getWeekData(Date.now() - 7 * 24 * 3600 * 1000).catch(() => null);
+      const weeklyWorkouts = weekData?.trainDays ?? 3;
+      const tdee = calculateTDEE(t.weight_kg ?? 105, t.height_cm ?? 176, t.age ?? 26, weeklyWorkouts);
+      const workoutKcal = sumWorkoutCalories(dayData.workouts);
+      const eaten = Math.round(dayData.totals?.calories ?? 0);
+      const netIntake = eaten - workoutKcal; // calories net of exercise
+      const deficit = tdee - eaten;          // how much below TDEE (positive = deficit)
+      const weeklyDeficitNeeded = ((t.weight_kg ?? 105) - (t.goal_weight ?? 80)) > 5 ? 500 : 250;
+      tdeeCtx = { tdee, workoutKcal, eaten, netIntake, deficit, weeklyDeficitNeeded, weight_kg: t.weight_kg, goal_weight: t.goal_weight };
+    } catch {}
+
+    const userProfile = db.getState(chatId);
+    const summaryText = stripMarkdown(await claude.generateDaySummary(dayData, targetsCtx, tdeeCtx, userProfile));
 
     await notion.createDailySummaryPage(dayData, summaryText, dateStr, targets).catch(err => console.error('Summary page error:', err.message));
     db.setState(chatId, { status: 'sleeping', bed_time: now });
@@ -129,7 +150,7 @@ async function handleBedTime(bot, chatId, state) {
     : getTomorrowStr();
   await syncNotionPlansToDb(chatId, tomorrow).catch(() => {});
   const timedTomorrow = db.getPendingTimed(chatId, tomorrow);
-  const gcalTomorrow  = await gcal.getEventsForDate(tomorrow).catch(() => []);
+  const gcalTomorrow  = await gcal.getEventsForDate(chatId, tomorrow).catch(() => []);
   const dbTitles = new Set(timedTomorrow.map(p => p.plan_text.toLowerCase()));
   const gcalExtra = gcalTomorrow.filter(e => !dbTitles.has(e.title.toLowerCase()) && !e.allDay);
   const allTomorrow = [
@@ -157,13 +178,13 @@ async function handleBedTime(bot, chatId, state) {
 
 async function sendEveningCheck(bot, chatId, dayStartMs) {
   try {
-    const [dayData, targets, drinkEntries] = await Promise.all([
-      notion.getDayData(dayStartMs).catch(() => ({ totals: { calories: 0, protein: 0, carbs: 0, fat: 0, caffeine: 0 }, meals: [], workouts: [], recovery: [] })),
-      notion.getTargets().catch(() => ({ calories: 1600, protein: 220, carbs: 80, fat: 53 })),
+    const targets = notion.getTargets(chatId) ?? { calories: 1600, protein: 220, carbs: 80, fat: 53 };
+    const [dayData, drinkEntries] = await Promise.all([
+      notion.getDayData(chatId, dayStartMs).catch(() => ({ totals: { calories: 0, protein: 0, carbs: 0, fat: 0, caffeine: 0 }, meals: [], workouts: [], recovery: [] })),
       notion.getDrinkEntries(dayStartMs).catch(() => []),
     ]);
 
-    const targetsCtx = notion.getTargetsText();
+    const targetsCtx = notion.getTargetsText(chatId);
 
     // Today's pending plans
     const todayStr  = getMalaysiaDateStr();
@@ -174,6 +195,19 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
     const caffeineTotal = stateNow.caffeine_today_mg ?? 0;
     const lastCaffeine  = stateNow.last_caffeine_time;
 
+    // TDEE partial-day tracking for evening check
+    let tdeeCtx = null;
+    try {
+      const weekDataEv = await notion.getWeekData(Date.now() - 7 * 24 * 3600 * 1000).catch(() => null);
+      const weeklyWorkoutsEv = weekDataEv?.trainDays ?? 3;
+      const t2 = targets;
+      const tdee = calculateTDEE(t2.weight_kg ?? 105, t2.height_cm ?? 176, t2.age ?? 26, weeklyWorkoutsEv);
+      const workoutKcal = sumWorkoutCalories(dayData.workouts);
+      const eaten = Math.round(dayData.totals?.calories ?? 0);
+      const deficit = tdee - eaten;
+      tdeeCtx = { tdee, workoutKcal, eaten, deficit, goal_weight: t2.goal_weight };
+    } catch {}
+
     const checkData = {
       totals:   dayData.totals,
       targets,
@@ -181,9 +215,10 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
       workouts: dayData.workouts,
       timedPlans: timedPlans.map(p => `${p.plan_text} at ${p.plan_time}`),
       tasks: tasks.map(p => p.plan_text),
+      tdee: tdeeCtx,
     };
 
-    const msg = stripMarkdown(await claude.generateEveningCheck(checkData, targetsCtx));
+    const msg = stripMarkdown(await claude.generateEveningCheck(checkData, targetsCtx, stateNow));
     const sent = await bot.sendMessage(chatId, msg);
 
     db.setState(chatId, {

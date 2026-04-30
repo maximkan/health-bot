@@ -53,21 +53,21 @@ function qualityStars(n) { return '★'.repeat(n) + '☆'.repeat(5 - n); }
 
 // ── Targets — SQLite primary, Notion mirror ───────────────────────────────────
 
-function getTargets() {
+function getTargets(chatId) {
   const db = require('./db');
-  return db.getTargetsFromDb();
+  return db.getTargetsFromDb(chatId);
 }
 
-function getTargetsText() {
-  const t = getTargets();
+function getTargetsText(chatId) {
+  const t = getTargets(chatId);
   return `Current weight: ~${t.weight_kg}kg, goal: ${t.goal_weight}kg\nDaily targets: ${t.calories} kcal / ${t.protein}g protein / ${t.carbs}g carbs / ${t.fat}g fat`;
 }
 
-async function updateTargets(updates) {
+async function updateTargets(chatId, updates) {
   const db = require('./db');
-  db.setTargetsInDb(updates);
+  db.setTargetsInDb(chatId, updates);
   // Mirror to Notion
-  if (config.notion.pages.targets) {
+  if (db.getState(chatId)?.notion_enabled && config.notion.pages.targets) {
     const props = {};
     if (updates.calories != null) props['Calories'] = { number: updates.calories };
     if (updates.protein  != null) props['Protein']  = { number: updates.protein };
@@ -82,12 +82,18 @@ async function updateTargets(updates) {
 // ── Day range filter ──────────────────────────────────────────────────────────
 
 function dayRangeFilter(dayStartMs) {
-  return { property: 'Date', date: { on_or_after: tsToISO(dayStartMs) } };
+  const dayEndMs = dayStartMs + 24 * 3600 * 1000;
+  return { and: [
+    { property: 'Date', date: { on_or_after: tsToISO(dayStartMs) } },
+    { property: 'Date', date: { before: tsToISO(dayEndMs) } },
+  ]};
 }
 
 // ── Meal Log ──────────────────────────────────────────────────────────────────
 
-async function createMealEntry(data) {
+async function createMealEntry(chatId, data) {
+  const db = require('./db');
+  if (!db.getState(chatId)?.notion_enabled) return null;
   const { meal_name, meal_type, items = [], totals, notes = '', time, caffeine_mg = 0 } = data;
   const dateISO = data.date
     ? buildDateTimeISO(data.date, time || null)
@@ -128,7 +134,9 @@ async function createMealEntry(data) {
 
 // ── Workout Log ───────────────────────────────────────────────────────────────
 
-async function createWorkoutEntry(data) {
+async function createWorkoutEntry(chatId, data) {
+  const db = require('./db');
+  if (!db.getState(chatId)?.notion_enabled) return null;
   const { workout_name, activity_type, duration_min, calories_burned, exercises = [], exercises_summary = '', notes = '' } = data;
   const children = [
     callout(`${workout_name}  ·  ${duration_min} min  ·  ~${calories_burned} kcal burned`, '💪', 'orange_background'),
@@ -178,7 +186,9 @@ async function updateWorkoutEntry(pageId, data) {
 
 // ── Recovery Log ──────────────────────────────────────────────────────────────
 
-async function createRecoveryEntry(data) {
+async function createRecoveryEntry(chatId, data) {
+  const db = require('./db');
+  if (!db.getState(chatId)?.notion_enabled) return null;
   const { type, duration_min, temperature_c, notes = '' } = data;
   const sessionName = `${type} ${duration_min} min`;
   const tempStr = temperature_c != null ? `  ·  ${temperature_c}°C` : '';
@@ -199,11 +209,15 @@ async function createRecoveryEntry(data) {
 
 // ── Sleep Log ─────────────────────────────────────────────────────────────────
 
-async function createSleepEntry(data) {
+async function createSleepEntry(chatId, data) {
+  const db = require('./db');
+  const notionEnabled = db.getState(chatId)?.notion_enabled;
   const { bed_time, wake_time, hours_slept, quality, notes = '', bed_date, type = 'Night' } = data;
   const isNap = type === 'Nap';
   const dateLabel = bed_date || getMalaysiaDateStr();
   const title = isNap ? `Nap ${dateLabel} ${bed_time}` : `Night of ${dateLabel}`;
+
+  if (!notionEnabled) return null;
 
   // For night sleep: check if entry already exists today and update instead of creating
   if (!isNap) {
@@ -390,7 +404,9 @@ async function getGolfHubContent() {
 
 // ── Daily totals & data ───────────────────────────────────────────────────────
 
-async function getDailyMealTotals(dayStartMs) {
+async function getDailyMealTotals(chatId, dayStartMs) {
+  const db = require('./db');
+  if (!db.getState(chatId)?.notion_enabled) return db.getDailyMealTotalsFromSQLite(chatId, dayStartMs);
   if (!config.notion.db.mealLog) return { calories: 0, protein: 0, carbs: 0, fat: 0 };
   // Use provided dayStart, or fall back to 20h ago (activity-day aware, not calendar midnight)
   const effectiveStart = dayStartMs || (Date.now() - 20 * 3600 * 1000);
@@ -437,7 +453,9 @@ async function getEntriesForDay(dbKey, titleProp, dayStartMs) {
   }));
 }
 
-async function getDayData(dayStartMs) {
+async function getDayData(chatId, dayStartMs) {
+  const db = require('./db');
+  if (!db.getState(chatId)?.notion_enabled) return db.getDayDataFromSQLite(chatId, dayStartMs);
   const filter = dayRangeFilter(dayStartMs);
   const [mealsRes, workoutsRes, recoveryRes] = await Promise.all([
     notion.databases.query({ database_id: config.notion.db.mealLog,    filter }).catch(() => ({ results: [] })),
@@ -522,22 +540,30 @@ async function deleteEntry(pageId) {
 
 // ── Known foods ───────────────────────────────────────────────────────────────
 
-function getKnownFoodsContext(dayOfWeek, weekType) {
+function getKnownFoodsContext(chatId, dayOfWeek, weekType) {
   const db = require('./db');
-  const foods = db.getKnownFoodsForDay(dayOfWeek, weekType);
-  return foods.map(f => `${f.name} (${f.serving}): ${f.calories} kcal, ${f.protein}g P, ${f.carbs}g C, ${f.fat}g F`).join('\n');
+  const foods = db.getKnownFoodsForDay(chatId, dayOfWeek, weekType);
+  const fmt = f => `  ${f.name} (${f.serving}): ${f.calories} kcal, ${f.protein}g P, ${f.carbs}g C, ${f.fat}g F`;
+  const dinner = foods.filter(f => f.notes?.startsWith('Dinner') || f.name?.includes('[Dinner'));
+  const lunch  = foods.filter(f => !f.notes?.startsWith('Dinner') && !f.name?.includes('[Dinner') && (f.notes?.startsWith('Lunch') || f.name?.includes('Week]')));
+  const other  = foods.filter(f => !dinner.includes(f) && !lunch.includes(f));
+  const sections = [];
+  if (lunch.length)  sections.push(`LUNCH MENU TODAY:\n${lunch.map(fmt).join('\n')}`);
+  if (dinner.length) sections.push(`DINNER MENU TODAY (macros per 100g):\n${dinner.map(fmt).join('\n')}`);
+  if (other.length)  sections.push(`OTHER FOODS:\n${other.map(fmt).join('\n')}`);
+  return sections.join('\n\n');
 }
 
-async function addKnownFood(data) {
+async function addKnownFood(chatId, data) {
   const name = data.meal_name;
   if (!name) return;
   if (name.includes('[Dinner') || name.includes('[Lunch') || name.includes('[NS Cafe]')) return;
   const db = require('./db');
-  if (db.knownFoodExists(name)) return;
+  if (db.knownFoodExists(chatId, name)) return;
   // SQLite first
-  db.upsertKnownFood({ name, serving: '1 serving', calories: data.totals?.calories ?? 0, protein: data.totals?.protein ?? 0, carbs: data.totals?.carbs ?? 0, fat: data.totals?.fat ?? 0, notes: 'Auto-saved', source: 'User Logged' });
-  // Mirror to Notion
-  if (config.notion.db.knownFoods) {
+  db.upsertKnownFood(chatId, { name, serving: '1 serving', calories: data.totals?.calories ?? 0, protein: data.totals?.protein ?? 0, carbs: data.totals?.carbs ?? 0, fat: data.totals?.fat ?? 0, notes: 'Auto-saved', source: 'User Logged' });
+  // Mirror to Notion only if user has Notion enabled
+  if (db.getState(chatId)?.notion_enabled && config.notion.db.knownFoods) {
     enqueue(() => notion.pages.create({
       parent: { database_id: config.notion.db.knownFoods },
       properties: {
@@ -654,6 +680,58 @@ async function getWeekData(weekStartMs) {
   return { dailyTotals, avgCal, avgProt, trainDays: workoutsRes.results.length, avgSleep, avgQuality, sauna, plunge };
 }
 
+// ── Historical data (for full analysis) ──────────────────────────────────────
+
+async function getHistoricalData() {
+  async function fetchAll(dbId) {
+    const results = [];
+    let cursor;
+    do {
+      const res = await notion.databases.query({
+        database_id: dbId, page_size: 100,
+        sorts: [{ property: 'Date', direction: 'ascending' }],
+        ...(cursor ? { start_cursor: cursor } : {}),
+      }).catch(() => ({ results: [], has_more: false }));
+      results.push(...res.results);
+      cursor = res.has_more ? res.next_cursor : null;
+    } while (cursor);
+    return results;
+  }
+
+  const [mealsAll, workoutsAll, sleepAll] = await Promise.all([
+    fetchAll(config.notion.db.mealLog),
+    fetchAll(config.notion.db.workoutLog),
+    fetchAll(config.notion.db.sleepLog),
+  ]);
+
+  const dailyTotals = {};
+  for (const page of mealsAll) {
+    const p = page.properties;
+    const date = p['Date']?.date?.start?.split('T')[0] ?? 'unknown';
+    if (!dailyTotals[date]) dailyTotals[date] = { calories: 0, protein: 0, fat: 0, protein: 0, meals: [] };
+    dailyTotals[date].calories += p['Total Calories']?.number ?? 0;
+    dailyTotals[date].protein  += p['Protein (g)']?.number    ?? 0;
+    dailyTotals[date].fat      += p['Fat (g)']?.number        ?? 0;
+    const mealName = p['Meal']?.title?.[0]?.text?.content;
+    if (mealName) dailyTotals[date].meals.push(mealName);
+  }
+  for (const d of Object.values(dailyTotals)) {
+    d.calories = Math.round(d.calories); d.protein = Math.round(d.protein); d.fat = Math.round(d.fat);
+  }
+
+  const workouts = workoutsAll.map(page => {
+    const p = page.properties;
+    return { date: p['Date']?.date?.start?.split('T')[0] ?? '', name: p['Workout']?.title?.[0]?.text?.content ?? '', duration: p['Duration (min)']?.number ?? 0 };
+  });
+
+  const sleep = sleepAll.map(page => {
+    const p = page.properties;
+    return { date: p['Date']?.date?.start?.split('T')[0] ?? '', hours: p['Hours Slept']?.number ?? 0, quality: Number(p['Quality']?.select?.name ?? '0') };
+  });
+
+  return { dailyTotals, workouts, sleep };
+}
+
 // ── All body measurements (for full analysis) ─────────────────────────────────
 
 async function getAllBodyMeasurements() {
@@ -676,5 +754,5 @@ module.exports = {
   getDailyMealTotals, getDrinkEntries, getEntriesForDay, getDayData, getTodayEntries,
   deleteEntry, getLastBodyMeasurement, getKnownFoodsContext, addKnownFood,
   createDailySummaryPage, createCoachNote, correctEntryTime,
-  getWeekData, getAllBodyMeasurements,
+  getWeekData, getAllBodyMeasurements, getHistoricalData,
 };
