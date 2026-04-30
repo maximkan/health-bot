@@ -368,7 +368,11 @@ function startBot() {
     }
 
     // ── Wake detection ────────────────────────────────────────────────────────
-    if (userState.status === 'sleeping' && isWake) {
+    // Also trigger if status stayed 'awake' (user fell asleep without saying gn) and it's been 18+ hours
+    const implicitNewDay = userState.status === 'awake'
+      && userState.current_day_start
+      && (Date.now() - userState.current_day_start) > 18 * 3600 * 1000;
+    if (isWake && (userState.status === 'sleeping' || implicitNewDay)) {
       pendingStates.delete(chatId);
       const isMonday = new Date(Date.now() + 8 * 3600 * 1000).getUTCDay() === 1;
       db.setState(chatId, { bed_nudge_sent: 0, weekly_waiting_weight: isMonday ? 1 : 0 });

@@ -19,10 +19,8 @@ function fmtHours(h) {
 
 async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
   const wakeMs   = wakeOverrideMs || Date.now();
-  const rawBedMs = state.bed_time;
-  // Stale bed_time guard: if >20h ago, the bed timestamp is from a previous night — ignore it
-  const hasBed   = rawBedMs != null && (wakeMs - rawBedMs) < 20 * 3600 * 1000;
-  const bedMs    = hasBed ? rawBedMs : null;
+  const hasBed   = state.bed_time != null;
+  const bedMs    = hasBed ? state.bed_time : null;
   const sleepH   = hasBed ? Math.round(Math.max(0, wakeMs - bedMs - 20 * 60 * 1000) / 3600000 * 10) / 10 : null;
   const sleepStr = sleepH != null ? fmtHours(sleepH) : null;
 
