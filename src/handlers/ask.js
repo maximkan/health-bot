@@ -2,22 +2,41 @@ const claude = require('../claude');
 const notion = require('../notion');
 const gcal   = require('../gcal');
 const db     = require('../db');
-const { nowContext, getMalaysiaDateStr, getTomorrowStr, getMalaysiaHour } = require('../utils/time');
+const { nowContext, getMalaysiaDateStr, getTomorrowStr, getMalaysiaHour, getDayOfWeek } = require('../utils/time');
+const { getCurrentWeekType } = require('../utils/weekTracker');
 
-const FULL_ANALYSIS_TRIGGERS = ['full analysis','progress report','how am i doing overall','summary since beginning','how\'s my progress','how is my progress','overall progress'];
+const FULL_ANALYSIS_TRIGGERS = [
+  'full analysis','progress report','how am i doing overall','summary since beginning',
+  'how\'s my progress','how is my progress','overall progress','how am i doing since',
+  'since the start','since i started','progress so far','how have i been doing',
+  'trend analysis','show me my progress','give me a full breakdown',
+];
 
 async function buildDayContext(chatId) {
   const state    = db.getState(chatId);
   const todayStr = getMalaysiaDateStr();
   const lines    = [nowContext()];
 
-  // Today's pending plans
-  const timedToday  = db.getPendingTimed(chatId, todayStr);
-  const timedTomorrow = db.getPendingTimed(chatId, getTomorrowStr());
-  const tasks       = db.getPendingUntimed(chatId);
+  // Wake time from DB
+  if (state.current_day_start) {
+    const wakeMYT = new Date(state.current_day_start + 8 * 3600 * 1000).toISOString().slice(11, 16);
+    lines.push(`Woke up at: ${wakeMYT} MYT`);
+  }
 
-  // Merge SQLite plans with GCal events
-  const gcalToday = await gcal.getEventsForDate(todayStr).catch(() => []);
+  // Today's totals — always from SQLite (source of truth)
+  const dayData = db.getDayDataFromSQLite(chatId, state.current_day_start);
+  const t = dayData.totals;
+  if (t.calories > 0 || t.protein > 0) {
+    lines.push(`Today so far: ${Math.round(t.calories)} kcal, ${Math.round(t.protein)}g protein, ${Math.round(t.carbs)}g carbs, ${Math.round(t.fat)}g fat`);
+  }
+  if (dayData.workouts.length) lines.push(`Workouts today: ${dayData.workouts.map(w => w.name).join(', ')}`);
+  if (dayData.meals.length)    lines.push(`Meals logged: ${dayData.meals.map(m => m.name).join(', ')}`);
+
+  // Plans
+  const timedToday    = db.getPendingTimed(chatId, todayStr);
+  const timedTomorrow = db.getPendingTimed(chatId, getTomorrowStr());
+  const tasks         = db.getPendingUntimed(chatId);
+  const gcalToday     = await gcal.getEventsForDate(chatId, todayStr).catch(() => []);
   const dbTodayTitles = new Set(timedToday.map(p => p.plan_text.toLowerCase()));
   const gcalTodayExtra = gcalToday.filter(e => !e.allDay && e.time && !dbTodayTitles.has(e.title.toLowerCase()));
 
@@ -28,17 +47,6 @@ async function buildDayContext(chatId) {
   if (allToday.length)      lines.push(`Today's plans: ${allToday.join(', ')}`);
   if (timedTomorrow.length && getMalaysiaHour() >= 19) lines.push(`Tomorrow's plans: ${timedTomorrow.map(p => `${p.plan_text} at ${p.plan_time}`).join(', ')}`);
   if (tasks.length)         lines.push(`Pending tasks: ${tasks.map(p => p.plan_text).join(', ')}`);
-
-  // Today's totals from Notion
-  try {
-    const dayData = await notion.getDayData(state.current_day_start);
-    const t = dayData.totals;
-    if (t.calories > 0 || t.protein > 0) {
-      lines.push(`Today so far: ${Math.round(t.calories)} kcal, ${Math.round(t.protein)}g protein, ${Math.round(t.carbs)}g carbs, ${Math.round(t.fat)}g fat`);
-    }
-    if (dayData.workouts.length) lines.push(`Workouts today: ${dayData.workouts.map(w => w.name).join(', ')}`);
-    if (dayData.meals.length)    lines.push(`Meals logged: ${dayData.meals.map(m => m.name).join(', ')}`);
-  } catch {}
 
   return lines.join('\n');
 }
@@ -58,20 +66,51 @@ async function handleAsk(bot, msg, context = '') {
   await bot.sendChatAction(chatId, 'typing');
   const text = msg.text || msg.caption || '';
 
-  const isFullAnalysis = FULL_ANALYSIS_TRIGGERS.some(t => text.toLowerCase().includes(t));
+  const lc = text.toLowerCase();
+  const isFullAnalysis  = FULL_ANALYSIS_TRIGGERS.some(t => lc.includes(t));
+  const isTrendQuestion = !isFullAnalysis && ['this week','last week','past few days','recently','pattern','trend','lately','past week','last few days','3 days','few days'].some(t => lc.includes(t));
 
   try {
     let targetsCtx = '';
-    try { targetsCtx = notion.getTargetsText(); } catch {}
+    try { targetsCtx = notion.getTargetsText(chatId); } catch {}
+
+    let knownFoodsCtx = '';
+    try { knownFoodsCtx = notion.getKnownFoodsContext(chatId, getDayOfWeek(), getCurrentWeekType()); } catch {}
 
     const dayCtx = await buildDayContext(chatId);
-    const notionCtx = context ? `${dayCtx}\n${context}` : dayCtx;
+
+    // Only add multi-day trend data when the question is trend-related (not for daily questions)
+    let trendCtx = '';
+    if (isTrendQuestion) {
+      try {
+        const weekStartMs = Date.now() - 7 * 24 * 3600 * 1000;
+        const weekData = await notion.getWeekData(weekStartMs);
+        if (weekData && Object.keys(weekData.dailyTotals || {}).length > 1) {
+          const days = Object.entries(weekData.dailyTotals).sort(([a],[b]) => a.localeCompare(b));
+          const trendLines = days.map(([date, d]) => `  ${date}: ${Math.round(d.calories)} kcal / ${Math.round(d.protein)}g P`);
+          trendCtx = `\nLast 7 days (kcal / protein):\n${trendLines.join('\n')}`;
+          if (weekData.trainDays) trendCtx += `\nWorkouts this week: ${weekData.trainDays}`;
+          if (weekData.avgSleep)  trendCtx += `\nAvg sleep this week: ${weekData.avgSleep}h`;
+        }
+      } catch {}
+    }
+
+    const notionCtx = [context || dayCtx, trendCtx].filter(Boolean).join('\n');
 
     if (isFullAnalysis) {
       await bot.sendMessage(chatId, 'pulling all your data...');
       try {
-        const bodyMeasurements = await notion.getAllBodyMeasurements().catch(() => []);
-        const fullCtx = `${notionCtx}\nBody measurements:\n${JSON.stringify(bodyMeasurements, null, 2)}`;
+        const [bodyMeasurements, historical] = await Promise.all([
+          notion.getAllBodyMeasurements().catch(() => []),
+          notion.getHistoricalData().catch(() => null),
+        ]);
+        const fullCtx = [
+          dayCtx,
+          `\nBody measurements:\n${JSON.stringify(bodyMeasurements, null, 2)}`,
+          historical ? `\nAll-time daily nutrition:\n${JSON.stringify(historical.dailyTotals, null, 2)}` : '',
+          historical?.workouts?.length ? `\nWorkout history:\n${JSON.stringify(historical.workouts, null, 2)}` : '',
+          historical?.sleep?.length    ? `\nSleep history:\n${JSON.stringify(historical.sleep, null, 2)}`    : '',
+        ].join('');
         const answer = stripMarkdown(await claude.generateFullAnalysis({ context: fullCtx }, targetsCtx));
         await bot.sendMessage(chatId, answer);
       } catch (err) {
@@ -81,7 +120,8 @@ async function handleAsk(bot, msg, context = '') {
       return;
     }
 
-    const answer = stripMarkdown(await claude.askCoach(text, notionCtx, targetsCtx));
+    const userProfile = db.getState(chatId);
+    const answer = stripMarkdown(await claude.askCoach(text, notionCtx, targetsCtx, knownFoodsCtx, userProfile));
     const sent = await bot.sendMessage(chatId, answer);
     db.setState(chatId, {
       last_coach_message_id: sent.message_id,

@@ -406,36 +406,15 @@ async function getGolfHubContent() {
 
 async function getDailyMealTotals(chatId, dayStartMs) {
   const db = require('./db');
-  if (!db.getState(chatId)?.notion_enabled) return db.getDailyMealTotalsFromSQLite(chatId, dayStartMs);
-  if (!config.notion.db.mealLog) return { calories: 0, protein: 0, carbs: 0, fat: 0 };
-  // Use provided dayStart, or fall back to 20h ago (activity-day aware, not calendar midnight)
-  const effectiveStart = dayStartMs || (Date.now() - 20 * 3600 * 1000);
-  const filter = dayRangeFilter(effectiveStart);
-  const response = await notion.databases.query({ database_id: config.notion.db.mealLog, filter });
-  return response.results.reduce((acc, page) => {
-    const p = page.properties;
-    acc.calories += p['Total Calories']?.number ?? 0;
-    acc.protein  += p['Protein (g)']?.number    ?? 0;
-    acc.carbs    += p['Carbs (g)']?.number      ?? 0;
-    acc.fat      += p['Fat (g)']?.number        ?? 0;
-    return acc;
-  }, { calories: 0, protein: 0, carbs: 0, fat: 0 });
+  return db.getDailyMealTotalsFromSQLite(chatId, dayStartMs);
 }
 
-async function getDrinkEntries(dayStartMs) {
-  if (!config.notion.db.mealLog) return [];
-  const response = await notion.databases.query({
-    database_id: config.notion.db.mealLog,
-    filter: { and: [dayRangeFilter(dayStartMs), { property: 'Meal Type', select: { equals: 'Drink' } }] },
-  }).catch(() => ({ results: [] }));
-  return response.results.map(page => {
-    const p = page.properties;
-    return {
-      meal_name:    p['Meal']?.title?.[0]?.text?.content ?? '',
-      date_iso:     p['Date']?.date?.start ?? '',
-      caffeine_mg:  p['Caffeine (mg)']?.number ?? 0,
-    };
-  });
+async function getDrinkEntries(chatId, dayStartMs) {
+  const db = require('./db');
+  const meals = db.getDayDataFromSQLite(chatId, dayStartMs).meals;
+  return meals
+    .filter(m => m.type === 'Drink')
+    .map(m => ({ meal_name: m.name, caffeine_mg: 0 }));
 }
 
 async function getEntriesForDay(dbKey, titleProp, dayStartMs) {
@@ -455,40 +434,7 @@ async function getEntriesForDay(dbKey, titleProp, dayStartMs) {
 
 async function getDayData(chatId, dayStartMs) {
   const db = require('./db');
-  if (!db.getState(chatId)?.notion_enabled) return db.getDayDataFromSQLite(chatId, dayStartMs);
-  const filter = dayRangeFilter(dayStartMs);
-  const [mealsRes, workoutsRes, recoveryRes] = await Promise.all([
-    notion.databases.query({ database_id: config.notion.db.mealLog,    filter }).catch(() => ({ results: [] })),
-    notion.databases.query({ database_id: config.notion.db.workoutLog, filter }).catch(() => ({ results: [] })),
-    notion.databases.query({ database_id: config.notion.db.recoveryLog,filter }).catch(() => ({ results: [] })),
-  ]);
-
-  const totals = { calories: 0, protein: 0, carbs: 0, fat: 0, caffeine: 0 };
-  const meals = mealsRes.results.map(page => {
-    const p = page.properties;
-    const cal = p['Total Calories']?.number ?? 0;
-    const prot = p['Protein (g)']?.number ?? 0;
-    const carb = p['Carbs (g)']?.number ?? 0;
-    const fat  = p['Fat (g)']?.number   ?? 0;
-    const caff = p['Caffeine (mg)']?.number ?? 0;
-    totals.calories += cal; totals.protein += prot; totals.carbs += carb; totals.fat += fat; totals.caffeine += caff;
-    return { name: p['Meal']?.title?.[0]?.text?.content ?? '?', type: p['Meal Type']?.select?.name ?? '', calories: Math.round(cal), protein: Math.round(prot), carbs: Math.round(carb), fat: Math.round(fat) };
-  });
-
-  const workouts = workoutsRes.results.map(page => {
-    const p = page.properties;
-    return { name: p['Workout']?.title?.[0]?.text?.content ?? 'Workout', duration_min: p['Duration (min)']?.number ?? 0, calories_burned: p['Calories Burned']?.number ?? 0 };
-  });
-
-  const recovery = recoveryRes.results.map(page => {
-    const p = page.properties;
-    return { type: p['Session']?.title?.[0]?.text?.content ?? 'Recovery', duration_min: p['Duration (min)']?.number ?? 0 };
-  });
-
-  return {
-    totals: { calories: Math.round(totals.calories), protein: Math.round(totals.protein), carbs: Math.round(totals.carbs), fat: Math.round(totals.fat), caffeine: Math.round(totals.caffeine) },
-    meals, workouts, recovery,
-  };
+  return db.getDayDataFromSQLite(chatId, dayStartMs);
 }
 
 // ── Last body measurement ─────────────────────────────────────────────────────

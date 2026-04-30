@@ -26,7 +26,7 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
 
   let prevTotals = null;
   if (state.current_day_start) {
-    prevTotals = await notion.getDailyMealTotals(state.current_day_start).catch(() => null);
+    prevTotals = await notion.getDailyMealTotals(chatId, state.current_day_start).catch(() => null);
   }
 
   db.setState(chatId, { status: 'awake', current_day_start: wakeMs, bed_time: null });
@@ -179,7 +179,7 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
     const targets = notion.getTargets(chatId) ?? { calories: 1600, protein: 220, carbs: 80, fat: 53 };
     const [dayData, drinkEntries] = await Promise.all([
       notion.getDayData(chatId, dayStartMs).catch(() => ({ totals: { calories: 0, protein: 0, carbs: 0, fat: 0, caffeine: 0 }, meals: [], workouts: [], recovery: [] })),
-      notion.getDrinkEntries(dayStartMs).catch(() => []),
+      notion.getDrinkEntries(chatId, dayStartMs).catch(() => []),
     ]);
 
     const targetsCtx = notion.getTargetsText(chatId);
