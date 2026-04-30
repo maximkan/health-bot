@@ -14,7 +14,6 @@ function init(bot) {
   cron.schedule('30 19 * * *', runEveningCheck,        tz); // 7:30 PM
   cron.schedule('30 0  * * *', () => runBedNudge(1),   tz); // 12:30 AM
   cron.schedule('0  2  * * *', () => runBedNudge(2),   tz); // 2:00 AM
-  cron.schedule('0  3  * * *', runAutoBed,             tz); // 3:00 AM
   // Weekly review triggered on Monday morning wake instead of fixed 8am cron
   cron.schedule('0  8  * * *', scheduleProactiveForDay, tz); // reschedule daily at 8am
   cron.schedule('0  */2 * * *', runUntimedReminders,   tz); // every 2 hrs
@@ -71,29 +70,6 @@ async function runBedNudge(nudgeNum) {
   }
 }
 
-// ── Auto-bed at 3 AM ──────────────────────────────────────────────────────────
-
-async function runAutoBed() {
-  const day = require('./handlers/day');
-  const claude = require('./claude');
-  const notion = require('./notion');
-
-  for (const chatId of db.getAllChatIds()) {
-    const state = db.getState(chatId);
-    if (state.status !== 'awake' || !state.bed_nudge_sent) continue;
-    try {
-      const dayData     = await notion.getDayData(state.current_day_start).catch(() => null);
-      let targetsCtx = '';
-      targetsCtx = notion.getTargetsText();
-      const summaryText = dayData ? await claude.generateDaySummary(dayData, targetsCtx) : 'No data for today.';
-      const targets     = notion.getTargets();
-      if (dayData) await notion.createDailySummaryPage(dayData, summaryText, getMalaysiaDateStr(), targets).catch(() => {});
-      db.setState(chatId, { status: 'sleeping', bed_nudge_sent: 0 });
-      await _bot.sendMessage(chatId, summaryText + '\n\n(auto-closed — you clearly fell asleep 😴)');
-    } catch (e) { console.error('Auto-bed error:', e.message); }
-  }
-}
-
 // ── Weekly review ─────────────────────────────────────────────────────────────
 
 async function runWeeklyReview() {
@@ -115,39 +91,57 @@ async function runWeeklyReview() {
 async function runProactive(timeLabel) {
   const claude = require('./claude');
   const notion = require('./notion');
+  const todayStr = getMalaysiaDateStr();
 
   for (const chatId of db.getAllChatIds()) {
     const state = db.getState(chatId);
     if (state.status !== 'awake') continue;
     if (db.wasRecentlyActive(chatId, 15)) continue; // skip if user was active in last 15 min
+    if (state.last_proactive_date === todayStr) continue; // already sent one proactive today
 
     try {
       const dayStart = state.current_day_start;
-      const dayData  = await notion.getDayData(dayStart).catch(() => null);
+      const dayData  = await notion.getDayData(chatId, dayStart).catch(() => null);
       if (!dayData) continue;
 
       const hoursAwake = dayStart ? (Date.now() - dayStart) / 3600000 : 0;
       const noMeals  = dayData.meals.length === 0 && hoursAwake >= 4;
       const lastLog  = noMeals ? null : 'recent';
 
-      const targetsCtx = notion.getTargetsText();
-      const targets = notion.getTargets();
+      const targetsCtx = notion.getTargetsText(chatId);
+      const targets = notion.getTargets(chatId);
+
+      // Fetch last 7 days for weekly pattern detection
+      let recentWeek = null;
+      try {
+        const weekData = await notion.getWeekData(Date.now() - 7 * 24 * 3600 * 1000);
+        recentWeek = weekData?.dailyTotals ?? null;
+      } catch {}
+
+      // Include recent bot messages so Claude knows what it already flagged
+      const recentAlerts = db.getHistory(chatId, 30)
+        .filter(m => m.role === 'assistant')
+        .slice(-6)
+        .map(m => m.text.slice(0, 200));
 
       const recentData = {
         time: timeLabel,
-        today: dayData.totals,
+        today: { ...dayData.totals, meals: dayData.meals.map(m => m.name) },
         targets,
         noMealsYet: noMeals,
         caffeine_mg: state.caffeine_today_mg ?? 0,
         last_caffeine_time: state.last_caffeine_time,
         hasWorkout: dayData.workouts.length > 0,
+        recentWeek,
+        recentAlerts,
       };
 
-      const rawAlert = await claude.checkProactivePatterns(recentData, targetsCtx);
+      const rawAlert = await claude.checkProactivePatterns(recentData, targetsCtx, state);
       const alert = rawAlert ? require('./handlers/ask').stripMarkdown(rawAlert) : null;
       if (alert) {
         const sent = await _bot.sendMessage(chatId, alert);
         db.saveCoachMessage(chatId, 'assistant', alert, sent.message_id);
+        db.setState(chatId, { last_proactive_date: todayStr });
       }
     } catch (e) { console.error('Proactive check error:', e.message); }
   }
@@ -194,7 +188,7 @@ async function runGCalSync() {
     // GCal → DB: import GCal events missing from DB (today + next 2 days)
     for (const dateStr of datesToSync) {
       try {
-        const events = await gcal.getEventsForDate(dateStr).catch(() => []);
+        const events = await gcal.getEventsForDate(chatId, dateStr).catch(() => []);
         const existing = new Set(db.getPendingTimed(chatId, dateStr).map(p => p.plan_text.toLowerCase()));
         for (const event of events) {
           if (!event.time || event.allDay) continue;
@@ -232,7 +226,7 @@ async function runGCalSync() {
           const plans = db.getPendingTimed(chatId, dateStr).filter(p => !p.calendar_event_created && !p.gcal_event_id);
           for (const plan of plans) {
             try {
-              const ev = await gcal.createEvent({ title: plan.plan_text, date: dateStr, time: plan.plan_time, guests: [] });
+              const ev = await gcal.createEvent(chatId, { title: plan.plan_text, date: dateStr, time: plan.plan_time, guests: [] });
               db.setPlanCalendar(plan.id);
               if (ev?.id) db.setPlanGCalId(plan.id, ev.id);
               console.log(`DB→GCal: created event "${plan.plan_text}" on ${dateStr}`);

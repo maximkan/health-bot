@@ -6,12 +6,13 @@ const claude  = require('./claude');
 const notion  = require('./notion');
 const day     = require('./handlers/day');
 const { showMealPreview, logMeal, applyCorrection, formatPreview } = require('./handlers/meal');
-const { showWorkoutPreview, logWorkout, formatWorkoutPreview } = require('./handlers/workout');
+const { showWorkoutPreview, logWorkout, formatWorkoutPreview, computeWorkoutCalories, formatExerciseLine } = require('./handlers/workout');
 const { handleRecovery }    = require('./handlers/recovery');
 const { handleSleep }       = require('./handlers/sleep');
 const { handleBody }        = require('./handlers/body');
 const { handleAsk, handleCoachReply, handlePhotoQuestion } = require('./handlers/ask');
 const { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans } = require('./handlers/plans');
+const { handleOnboarding } = require('./handlers/onboarding');
 const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { buildTimeISO, nowContext, getMalaysiaDateStr, extractTimeMs, detectRetroDate } = require('./utils/time');
@@ -105,6 +106,8 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     return;
   }
 
+  const MEAL_SET = new Set(['MEAL_LOG','DRINK_LOG']);
+
   // Only treat as CORRECTION if no meal intent — "had pizza at 1pm" is a meal, not a correction
   if (intents.includes('CORRECTION') && !intents.some(i => MEAL_SET.has(i))) {
     const result = await handleCorrection(bot, msg, chatId, userState);
@@ -114,13 +117,16 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     }
     return;
   }
-
-  const MEAL_SET = new Set(['MEAL_LOG','DRINK_LOG']);
   const nonMeal  = intents.filter(i => !MEAL_SET.has(i));
   const hasMeal  = intents.some(i => MEAL_SET.has(i));
 
   for (const intent of nonMeal) {
     switch (intent) {
+      case 'WORKOUT_START': {
+        pendingStates.set(chatId, { type: 'live_workout', exercises: [], startTime: Date.now() });
+        await bot.sendMessage(chatId, 'got it — send me your exercises one by one as you finish them. say "done" when you\'re finished.');
+        return;
+      }
       case 'WORKOUT_LOG': {
         const wData = await showWorkoutPreview(bot, msg);
         if (wData) pendingStates.set(chatId, { type: 'workout_confirm', workoutData: wData, catchupRetro: msg._catchupRetro });
@@ -147,7 +153,8 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     if (!data) {
       pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: msg.text, dayStart: retroDate?.dayStartMs ?? userState?.current_day_start, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
     } else {
-      pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: retroDate?.dayStartMs ?? userState?.current_day_start, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
+      // Both normal data and low-confidence partial data go to meal_confirm
+      pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart: retroDate?.dayStartMs ?? userState?.current_day_start, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
     }
   }
 }
@@ -188,7 +195,7 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
     }
     const photo = await downloadPhoto(bot, msg);
     const data = await showMealPreview(bot, msg, photo);
-    if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart });
+    if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart });
     else pendingStates.set(chatId, { type: 'meal_photo_clarification', caption: msg.caption || '', photo, dayStart });
     return;
   }
@@ -240,20 +247,47 @@ function startBot() {
   const bot = new TelegramBot(config.telegram.healthToken, { polling: true });
   console.log('✅ Health bot polling started');
 
-  // Save bot text replies to chat history for classifier context
+  // Auto-translate hardcoded English messages for non-English users, save to history
   const _origSend = bot.sendMessage.bind(bot);
+  const _tlCache  = new Map();
   bot.sendMessage = async (chatId, text, opts) => {
-    const result = await _origSend(chatId, text, opts);
-    if (typeof text === 'string') db.saveHistory(chatId, 'assistant', text);
-    return result;
+    let finalText = text;
+    if (typeof text === 'string') {
+      const lang = db.getState(chatId)?.language;
+      const needsTranslation = lang && !/^en(glish)?$/i.test(lang.trim());
+      // Skip translation only if non-Latin chars outnumber Latin chars (already mostly translated)
+      const latinCount    = (text.match(/[a-zA-Z]/g) || []).length;
+      const nonLatinCount = (text.match(/[а-яА-ЯёЁ\u4e00-\u9fff\u0600-\u06ff\u0e00-\u0e7f\u3040-\u30ff]/g) || []).length;
+      const alreadyTranslated = nonLatinCount > 0 && nonLatinCount > latinCount;
+      if (needsTranslation && !alreadyTranslated) {
+        const key = `${lang}|${text}`;
+        if (_tlCache.has(key)) {
+          finalText = _tlCache.get(key);
+        } else {
+          try {
+            finalText = await claude.translateText(text, lang);
+            _tlCache.set(key, finalText);
+          } catch { finalText = text; }
+        }
+      }
+      db.saveHistory(chatId, 'assistant', finalText);
+    }
+    return await _origSend(chatId, finalText, opts);
   };
 
   cronSvc.init(bot);
+  require('./auth-server').start(() => bot);
 
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     try {
     const userState = db.getState(chatId);
+
+    // ── Onboarding gate ───────────────────────────────────────────────────────
+    if (!userState.onboarded) {
+      await handleOnboarding(bot, msg);
+      return;
+    }
 
     // ── COACH_REPLY: user swiped-replied to a coach message ──────────────────
     if (msg.reply_to_message?.message_id) {
@@ -437,10 +471,52 @@ function startBot() {
         return;
       }
 
+      if (state.type === 'live_workout') {
+        const text = (msg.text || '').trim();
+        const isDone = /^(done|finished|that'?s? (it|all)|end|finish|готово|закончил|всё)$/i.test(text);
+
+        if (isDone && state.exercises.length === 0) {
+          pendingStates.delete(chatId);
+          await bot.sendMessage(chatId, 'no exercises logged. cancelled.');
+          return;
+        }
+
+        if (isDone) {
+          pendingStates.delete(chatId);
+          const durationMin = Math.round((Date.now() - state.startTime) / 60000);
+          const workoutData = {
+            workout_name: 'Gym',
+            activity_type: 'weights',
+            duration_min: durationMin || null,
+            exercises: state.exercises,
+          };
+          workoutData.calories_burned = computeWorkoutCalories(chatId, workoutData);
+          const preview = formatWorkoutPreview(workoutData);
+          await bot.sendMessage(chatId, preview);
+          pendingStates.set(chatId, { type: 'workout_confirm', workoutData });
+          return;
+        }
+
+        // Try to parse as exercise
+        try {
+          await bot.sendChatAction(chatId, 'typing');
+          const parsed = await claude.parseLiveExercise(text);
+          if (parsed?.name) {
+            state.exercises.push(parsed);
+            const line = formatExerciseLine(parsed).trim();
+            await bot.sendMessage(chatId, `${line} ✅`);
+          } else {
+            await bot.sendMessage(chatId, "didn't catch that — try: 'bench press 3x10 100kg'");
+          }
+        } catch {
+          await bot.sendMessage(chatId, "didn't catch that — try: 'bench press 3x10 100kg'");
+        }
+        return;
+      }
+
       if (state.type === 'workout_confirm') {
         const text = msg.text || '';
-        const isWorkoutCancel = earlyIntents.length === 1 && earlyIntents[0] === 'GENERAL'
-          && text.trim().split(/\s+/).length <= 3
+        const isWorkoutCancel = text.trim().split(/\s+/).length <= 3
           && /^(no|nope|cancel|skip|stop|abort|nevermind|never mind)$/i.test(text.trim());
         if (isWorkoutCancel) {
           pendingStates.delete(chatId);
@@ -451,7 +527,7 @@ function startBot() {
 
         if (isConfirmation(text) && !isWCorrection) {
           pendingStates.delete(chatId);
-          await logWorkout(bot, chatId, state.workoutData);
+          await logWorkout(bot, chatId, state.workoutData, userState.current_day_start);
           if (state.catchupRetro) {
             await bot.sendMessage(chatId, 'anything else? (or done)');
             pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
@@ -464,6 +540,7 @@ function startBot() {
           await bot.sendChatAction(chatId, 'typing');
           try {
             const updated = await claude.applyWorkoutCorrection(state.workoutData, text);
+            updated.calories_burned = computeWorkoutCalories(chatId, updated);
             await bot.sendMessage(chatId, formatWorkoutPreview(updated));
             pendingStates.set(chatId, { type: 'workout_confirm', workoutData: updated, catchupRetro: state.catchupRetro });
           } catch {
@@ -473,13 +550,12 @@ function startBot() {
         }
 
         if (earlyIntents.includes('COACH_QUESTION')) {
-          pendingStates.delete(chatId);
-          await handleAsk(bot, msg);
+          await handleAsk(bot, msg, `Workout being reviewed:\n${formatWorkoutPreview(state.workoutData)}`);
           return;
         }
 
         pendingStates.delete(chatId);
-        await logWorkout(bot, chatId, state.workoutData);
+        await logWorkout(bot, chatId, state.workoutData, userState.current_day_start);
         if (state.catchupRetro) {
           await bot.sendMessage(chatId, 'anything else? (or done)');
           pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
@@ -511,8 +587,7 @@ function startBot() {
         const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
 
         // Cancel only on standalone short cancel messages — never on sentences that start with "no"
-        const isExplicitCancel = earlyIntents.length === 1 && earlyIntents[0] === 'GENERAL'
-          && text.trim().split(/\s+/).length <= 3
+        const isExplicitCancel = text.trim().split(/\s+/).length <= 3
           && /^(no|nope|cancel|skip|stop|abort|nevermind|never mind)$/i.test(text.trim());
         if (isExplicitCancel) {
           pendingStates.delete(chatId);
@@ -526,8 +601,14 @@ function startBot() {
 
         const isCorrectionIntent = earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i));
 
-        // Explicit confirmation → log immediately, never reroute
+        // Explicit confirmation → if clarification pending, show preview first; otherwise log
         if (isConfirmation(text) && !isCorrectionIntent) {
+          if (state.needsClarification) {
+            // Show the preview so user sees what's being logged, then await final confirm
+            pendingStates.set(chatId, { ...state, needsClarification: false });
+            await bot.sendMessage(chatId, formatPreview(mealData));
+            return;
+          }
           pendingStates.delete(chatId);
           await logMeal(bot, chatId, mealData, state.dayStart);
           if (state.catchupRetro) {
@@ -547,10 +628,9 @@ function startBot() {
           return;
         }
 
-        // Question → answer it, drop the pending meal
+        // Question → answer with meal context, keep pending state so next reply still confirms/cancels
         if (earlyIntents.includes('COACH_QUESTION')) {
-          pendingStates.delete(chatId);
-          await handleAsk(bot, msg);
+          await handleAsk(bot, msg, `Meal being reviewed:\n${formatPreview(mealData)}`);
           return;
         }
 
@@ -624,10 +704,10 @@ function scheduleWeeklyReminders(bot, chatId) {
 async function handleUpdateTargets(bot, msg, chatId) {
   await bot.sendChatAction(chatId, 'typing');
   try {
-    const current = notion.getTargets();
+    const current = notion.getTargets(chatId);
     const newTargets = await claude.recalculateTargets(current, msg.text || '');
     if (!newTargets || !newTargets.calories) { await bot.sendMessage(chatId, "couldn't figure that out. try: 'change calories to 1800'"); return; }
-    await notion.updateTargets(newTargets);
+    await notion.updateTargets(chatId, newTargets);
     await bot.sendMessage(chatId,
       `✅ targets updated:\n${newTargets.calories} kcal · ${newTargets.protein}g P · ${newTargets.carbs}g C · ${newTargets.fat}g F`
     );
@@ -647,7 +727,7 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     const now = Date.now();
     const weekStartMs = now - 7 * 24 * 3600 * 1000;
     const weekData = await notion.getWeekData(weekStartMs).catch(() => ({}));
-    const targetsCtx = notion.getTargetsText();
+    const targetsCtx = notion.getTargetsText(chatId);
 
     const review = await claude.generateWeeklyReview(weekData, targetsCtx);
     const sent = await bot.sendMessage(chatId, review);
@@ -655,6 +735,16 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     await notion.createCoachNote(`Weekly Review — ${getMalaysiaDateStr()}`, review, 'Weekly Review').catch(() => {});
     db.setState(chatId, { last_coach_message_id: sent.message_id });
     db.saveCoachMessage(chatId, 'assistant', review, sent.message_id);
+
+    // Weekly strength summary (fire-and-forget)
+    try {
+      const recentWorkouts = db.getRecentWorkouts(chatId, 28);
+      if (recentWorkouts.length >= 2) {
+        const state = db.getState(chatId);
+        const strengthSummary = await claude.generateWeeklyStrengthSummary(recentWorkouts, state);
+        if (strengthSummary) await bot.sendMessage(chatId, strengthSummary);
+      }
+    } catch (err) { console.error('Weekly strength summary error:', err.message); }
   } catch (err) {
     console.error('Weekly review flow error:', err.message);
   }
