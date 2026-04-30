@@ -29,7 +29,7 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
     prevTotals = await notion.getDailyMealTotals(state.current_day_start).catch(() => null);
   }
 
-  db.setState(chatId, { status: 'awake', current_day_start: wakeMs });
+  db.setState(chatId, { status: 'awake', current_day_start: wakeMs, bed_time: null });
   db.resetCaffeine(chatId);
 
   const sleepLine = sleepStr ? `${sleepStr} sleep. ` : '';
