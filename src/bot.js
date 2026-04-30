@@ -53,12 +53,11 @@ async function handleDeletion(bot, msg, chatId, userState) {
   await bot.sendChatAction(chatId, 'typing');
   const dayStart = userState?.current_day_start;
   try {
-    const entries = await notion.getTodayEntries(dayStart);
+    const entries = db.getTodayEntriesFromSQLite(chatId, dayStart);
     if (!entries.length) { await bot.sendMessage(chatId, 'Nothing logged today to delete.'); return; }
 
     const match = await claude.matchEntryToDelete(msg.text, entries);
     if (!match) {
-      // Can't determine — show list
       const lines = ["Which entry to delete?\n", ...entries.map((e, i) => `${i+1}. [${e.label}] ${e.title}${e.extra ? ' — ' + e.extra : ''}`)];
       lines.push('\nReply "delete N" to remove.');
       pendingStates.set(chatId, { type: 'today_list', entries });
@@ -66,11 +65,12 @@ async function handleDeletion(bot, msg, chatId, userState) {
       return;
     }
 
-    await notion.deleteEntry(match.pageId);
+    db.deleteTodayEntry(match);
+    notion.deleteEntry(match.pageId).catch(() => {}); // mirror to Notion best-effort
     await bot.sendMessage(chatId, `🗑 deleted: ${match.title}${match.extra ? ' — ' + match.extra : ''}`);
   } catch (err) {
     console.error('Delete error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to delete. Try /today to see entries.');
+    await bot.sendMessage(chatId, '❌ Failed to delete.');
   }
 }
 
@@ -218,11 +218,10 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
     const state = pendingStates.get(chatId);
     const idx = parseInt(delMatch[1]) - 1;
     if (idx >= 0 && idx < state.entries.length) {
-      try {
-        await notion.deleteEntry(state.entries[idx].pageId);
-        pendingStates.delete(chatId);
-        await bot.sendMessage(chatId, `🗑 Deleted: ${state.entries[idx].title}`);
-      } catch { await bot.sendMessage(chatId, '❌ Failed to delete.'); }
+      db.deleteTodayEntry(state.entries[idx]);
+      notion.deleteEntry(state.entries[idx].pageId).catch(() => {});
+      pendingStates.delete(chatId);
+      await bot.sendMessage(chatId, `🗑 deleted: ${state.entries[idx].title}`);
     } else {
       await bot.sendMessage(chatId, `Pick 1–${state.entries.length}.`);
     }
@@ -730,7 +729,7 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
 
     const now = Date.now();
     const weekStartMs = now - 7 * 24 * 3600 * 1000;
-    const weekData = await notion.getWeekData(weekStartMs).catch(() => ({}));
+    const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
     const targetsCtx = notion.getTargetsText(chatId);
 
     const review = await claude.generateWeeklyReview(weekData, targetsCtx);
@@ -757,17 +756,12 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
 // ── /today ────────────────────────────────────────────────────────────────────
 
 async function handleToday(bot, chatId, dayStart) {
-  try {
-    const entries = await notion.getTodayEntries(dayStart);
-    if (!entries.length) { await bot.sendMessage(chatId, 'Nothing logged today yet.'); return; }
-    const lines = ["Today's logs:\n", ...entries.map((e, i) => `${i+1}. [${e.label}] ${e.title}${e.extra ? ` — ${e.extra}` : ''}`)];
-    lines.push('\nReply "delete N" to remove an entry.');
-    pendingStates.set(chatId, { type: 'today_list', entries });
-    await bot.sendMessage(chatId, lines.join('\n'));
-  } catch (err) {
-    console.error('Today error:', err.message);
-    await bot.sendMessage(chatId, "❌ Failed to fetch today's logs.");
-  }
+  const entries = db.getTodayEntriesFromSQLite(chatId, dayStart);
+  if (!entries.length) { await bot.sendMessage(chatId, 'Nothing logged today yet.'); return; }
+  const lines = ["Today's logs:\n", ...entries.map((e, i) => `${i+1}. [${e.label}] ${e.title}${e.extra ? ` — ${e.extra}` : ''}`)];
+  lines.push('\nReply "delete N" to remove an entry.');
+  pendingStates.set(chatId, { type: 'today_list', entries });
+  await bot.sendMessage(chatId, lines.join('\n'));
 }
 
 async function sendHelp(bot, chatId) {

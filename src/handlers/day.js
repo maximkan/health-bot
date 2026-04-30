@@ -120,7 +120,7 @@ async function handleBedTime(bot, chatId, state) {
     const t = targets;
     let tdeeCtx = null;
     try {
-      const weekData = await notion.getWeekData(Date.now() - 7 * 24 * 3600 * 1000).catch(() => null);
+      const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
       const weeklyWorkouts = weekData?.trainDays ?? 3;
       const tdee = calculateTDEE(t.weight_kg ?? 105, t.height_cm ?? 176, t.age ?? 26, weeklyWorkouts);
       const workoutKcal = sumWorkoutCalories(dayData.workouts);
@@ -196,7 +196,7 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
     // TDEE partial-day tracking for evening check
     let tdeeCtx = null;
     try {
-      const weekDataEv = await notion.getWeekData(Date.now() - 7 * 24 * 3600 * 1000).catch(() => null);
+      const weekDataEv = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
       const weeklyWorkoutsEv = weekDataEv?.trainDays ?? 3;
       const t2 = targets;
       const tdee = calculateTDEE(t2.weight_kg ?? 105, t2.height_cm ?? 176, t2.age ?? 26, weeklyWorkoutsEv);

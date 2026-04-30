@@ -84,7 +84,7 @@ async function handleAsk(bot, msg, context = '') {
     if (isTrendQuestion) {
       try {
         const weekStartMs = Date.now() - 7 * 24 * 3600 * 1000;
-        const weekData = await notion.getWeekData(weekStartMs);
+        const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
         if (weekData && Object.keys(weekData.dailyTotals || {}).length > 1) {
           const days = Object.entries(weekData.dailyTotals).sort(([a],[b]) => a.localeCompare(b));
           const trendLines = days.map(([date, d]) => `  ${date}: ${Math.round(d.calories)} kcal / ${Math.round(d.protein)}g P`);

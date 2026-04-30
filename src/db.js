@@ -428,6 +428,46 @@ function saveWorkoutLog(chatId, data, dayStart) {
     ).lastInsertRowid;
 }
 
+function getTodayEntriesFromSQLite(chatId, dayStart) {
+  const meals    = db.prepare('SELECT id, meal_name, meal_type, calories FROM meal_log WHERE chat_id=? AND day_start=? ORDER BY logged_at ASC').all(chatId, dayStart);
+  const workouts = db.prepare('SELECT id, workout_name, duration_min FROM workout_log WHERE chat_id=? AND day_start=? ORDER BY logged_at ASC').all(chatId, dayStart);
+  const entries = [
+    ...meals.map(m    => ({ id: m.id,    table: 'meal_log',    label: 'Meal',    title: m.meal_name,    extra: `${Math.round(m.calories)} kcal` })),
+    ...workouts.map(w => ({ id: w.id,    table: 'workout_log', label: 'Workout', title: w.workout_name, extra: w.duration_min ? `${w.duration_min} min` : '' })),
+  ];
+  return entries;
+}
+
+function deleteTodayEntry(entry) {
+  db.prepare(`DELETE FROM ${entry.table} WHERE id=?`).run(entry.id);
+}
+
+function getWeekDataFromSQLite(chatId, sinceMs) {
+  const OFFSET = 8 * 3600 * 1000;
+  const meals    = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
+  const workouts = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
+  const sleeps   = db.prepare('SELECT hours_slept FROM sleep_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
+
+  const dailyTotals = {};
+  for (const m of meals) {
+    const key = new Date((m.day_start || m.logged_at) + OFFSET).toISOString().split('T')[0];
+    if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    dailyTotals[key].calories += m.calories ?? 0;
+    dailyTotals[key].protein  += m.protein  ?? 0;
+    dailyTotals[key].carbs    += m.carbs    ?? 0;
+    dailyTotals[key].fat      += m.fat      ?? 0;
+  }
+  for (const k of Object.keys(dailyTotals)) {
+    const d = dailyTotals[k];
+    dailyTotals[k] = { calories: Math.round(d.calories), protein: Math.round(d.protein), carbs: Math.round(d.carbs), fat: Math.round(d.fat) };
+  }
+
+  const trainDaySet = new Set(workouts.map(w => new Date((w.day_start || w.logged_at) + OFFSET).toISOString().split('T')[0]));
+  const avgSleep = sleeps.length ? Math.round(sleeps.reduce((s, r) => s + (r.hours_slept || 0), 0) / sleeps.length * 10) / 10 : null;
+
+  return { dailyTotals, trainDays: trainDaySet.size, avgSleep };
+}
+
 function getRecentWorkouts(chatId, days = 30) {
   const sinceMs = Date.now() - days * 24 * 3600 * 1000;
   return db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at DESC LIMIT 20')
@@ -479,4 +519,5 @@ module.exports = {
   getTargetsFromDb, setTargetsInDb,
   saveMealLog, getDayDataFromSQLite, getDailyMealTotalsFromSQLite,
   saveWorkoutLog, getRecentWorkouts, saveSleepLog,
+  getTodayEntriesFromSQLite, deleteTodayEntry, getWeekDataFromSQLite,
 };

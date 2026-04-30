@@ -111,11 +111,8 @@ async function runProactive(timeLabel) {
       const targets = notion.getTargets(chatId);
 
       // Fetch last 7 days for weekly pattern detection
-      let recentWeek = null;
-      try {
-        const weekData = await notion.getWeekData(Date.now() - 7 * 24 * 3600 * 1000);
-        recentWeek = weekData?.dailyTotals ?? null;
-      } catch {}
+      const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
+      const recentWeek = weekData?.dailyTotals ?? null;
 
       // Include recent bot messages so Claude knows what it already flagged
       const recentAlerts = db.getHistory(chatId, 30)
