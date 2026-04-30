@@ -504,7 +504,7 @@ function startBot() {
           if (parsed?.name) {
             state.exercises.push(parsed);
             const line = formatExerciseLine(parsed).trim();
-            await bot.sendMessage(chatId, `${line} ✅`);
+            await bot.sendMessage(chatId, `${line} ✅\nnext exercise, or 'finished' to wrap up`);
           } else {
             await bot.sendMessage(chatId, "didn't catch that — try: 'bench press 3x10 100kg'");
           }

@@ -97,7 +97,6 @@ async function runProactive(timeLabel) {
     const state = db.getState(chatId);
     if (state.status !== 'awake') continue;
     if (db.wasRecentlyActive(chatId, 15)) continue; // skip if user was active in last 15 min
-    if (state.last_proactive_date === todayStr) continue; // already sent one proactive today
 
     try {
       const dayStart = state.current_day_start;
@@ -124,6 +123,9 @@ async function runProactive(timeLabel) {
         .slice(-6)
         .map(m => m.text.slice(0, 200));
 
+      const todayAlert = (state.last_proactive_date === todayStr && state.last_proactive_msg)
+        ? state.last_proactive_msg : null;
+
       const recentData = {
         time: timeLabel,
         today: { ...dayData.totals, meals: dayData.meals.map(m => m.name) },
@@ -134,6 +136,7 @@ async function runProactive(timeLabel) {
         hasWorkout: dayData.workouts.length > 0,
         recentWeek,
         recentAlerts,
+        todayAlert,
       };
 
       const rawAlert = await claude.checkProactivePatterns(recentData, targetsCtx, state);
@@ -141,7 +144,7 @@ async function runProactive(timeLabel) {
       if (alert) {
         const sent = await _bot.sendMessage(chatId, alert);
         db.saveCoachMessage(chatId, 'assistant', alert, sent.message_id);
-        db.setState(chatId, { last_proactive_date: todayStr });
+        db.setState(chatId, { last_proactive_date: todayStr, last_proactive_msg: alert.slice(0, 200) });
       }
     } catch (e) { console.error('Proactive check error:', e.message); }
   }

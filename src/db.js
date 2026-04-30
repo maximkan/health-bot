@@ -75,7 +75,8 @@ addCol('user_state', 'bed_time_pref', 'TEXT');
 addCol('user_state', 'wake_time_pref', 'TEXT');
 addCol('user_state', 'timezone', 'TEXT DEFAULT "Asia/Kuala_Lumpur"');
 addCol('user_state', 'gender', 'TEXT DEFAULT "male"');
-addCol('user_state', 'last_proactive_date', 'TEXT');;
+addCol('user_state', 'last_proactive_date', 'TEXT');
+addCol('user_state', 'last_proactive_msg', 'TEXT');;
 
 addCol('plans', 'gcal_event_id', 'TEXT');
 
