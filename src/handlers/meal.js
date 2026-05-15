@@ -1,6 +1,6 @@
 const claude = require('../claude');
 const db     = require('../db');
-const { getDayOfWeek, requireTimezone } = require('../utils/time');
+const { getDayOfWeekTz, nowContextTz, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 
 function formatPreview(data) {
@@ -48,12 +48,12 @@ async function showMealPreview(bot, msg, photos) {
   try {
     const caption = msg.caption || msg.text || '';
     const userState = db.getState(chatId);
-    const dayOfWeek = getDayOfWeek();
-    const weekType  = getCurrentWeekType(requireTimezone(userState));
+    const tz        = requireTimezone(userState);
+    const dayOfWeek = getDayOfWeekTz(tz);
+    const weekType  = getCurrentWeekType(tz);
     let knownFoodsCtx = '';
     try { knownFoodsCtx = db.getKnownFoodsContext(chatId, dayOfWeek, weekType); } catch {}
 
-    const { nowContext } = require('../utils/time');
     const institutionKeywords = userState?.institution_keywords || null;
 
     let captionWithCtx = caption;
@@ -63,7 +63,7 @@ async function showMealPreview(bot, msg, photos) {
       if (lastBot) captionWithCtx = `${caption}\n\n[Recent coach context: ${lastBot.content.slice(0, 300)}]`;
     }
 
-    const data = await claude.analyzeMeal(photoList, captionWithCtx, dayOfWeek, knownFoodsCtx, nowContext(), institutionKeywords);
+    const data = await claude.analyzeMeal(photoList, captionWithCtx, dayOfWeek, knownFoodsCtx, nowContextTz(tz), institutionKeywords);
 
     if (data.confidence === 'low' && data.clarification) {
       await bot.sendMessage(chatId, `🤔 ${data.clarification}`);

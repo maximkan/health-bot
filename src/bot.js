@@ -15,7 +15,7 @@ const { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans } = require(
 const { handleOnboarding } = require('./handlers/onboarding');
 const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
-const { nowContext, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
+const { nowContextTz, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
 
 const CONFIRM_WORDS = ['ok','okay','yes','log','log it','✅','yep','yup','looks good','good','sure','go',
   'ок','окей','да','хорошо','ладно','давай','логировать','логируй','запиши','сохрани','подтверждаю'];

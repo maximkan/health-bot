@@ -1,15 +1,11 @@
-const OFFSET_MS = 8 * 60 * 60 * 1000; // UTC+8 Malaysia
-
-// ── Per-user timezone helpers ─────────────────────────────────────────────────
+// ── Time helpers (all timezone-aware) ────────────────────────────────────────
 
 function getOffsetMs(timezone) {
-  if (!timezone || timezone === 'Asia/Kuala_Lumpur') return OFFSET_MS;
-  try {
-    const now = new Date();
-    const local = new Date(now.toLocaleString('en-US', { timeZone: timezone }));
-    const utc   = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
-    return Math.round((local - utc) / 60000) * 60000;
-  } catch { return OFFSET_MS; }
+  if (!timezone) throw new Error('getOffsetMs called without timezone');
+  const now = new Date();
+  const local = new Date(now.toLocaleString('en-US', { timeZone: timezone }));
+  const utc   = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+  return Math.round((local - utc) / 60000) * 60000;
 }
 
 function getDateStrTz(timezone) {
@@ -37,18 +33,10 @@ function nowContextTz(timezone) {
   return `Current time: ${dateStr} ${h}:${m} (${days[d.getUTCDay()]} ${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${tzLabel})`;
 }
 
-function getMalaysiaDate() { return new Date(Date.now() + OFFSET_MS); }
-function getMalaysiaISO()  { return getMalaysiaDate().toISOString().replace('Z', '+08:00'); }
-function getMalaysiaDateStr() { return getMalaysiaDate().toISOString().split('T')[0]; }
-function getMalaysiaHour()    { return getMalaysiaDate().getUTCHours(); }
-
-function getDayOfWeek() {
-  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][getMalaysiaDate().getUTCDay()];
-}
-
-function getTodayRange() {
-  const d = getMalaysiaDateStr();
-  return { start: `${d}T00:00:00+08:00`, end: `${d}T23:59:59+08:00` };
+function getDayOfWeekTz(tz) {
+  if (!tz) throw new Error('getDayOfWeekTz called without tz');
+  const offsetMs = getOffsetMs(tz);
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(Date.now() + offsetMs).getUTCDay()];
 }
 
 // Build ISO offset suffix from offsetMs (e.g. +05:30, -08:00)
@@ -60,13 +48,15 @@ function buildTzSuffix(offsetMs) {
 }
 
 // UTC timestamp → ISO 8601 with tz offset
-function tsToISO(ms, tz = 'Asia/Kuala_Lumpur') {
+function tsToISO(ms, tz) {
+  if (!tz) throw new Error('tsToISO called without tz');
   const offsetMs = getOffsetMs(tz);
   return new Date(ms + offsetMs).toISOString().slice(0, 19) + buildTzSuffix(offsetMs);
 }
 
 // UTC timestamp → "HH:MM" in user's timezone
-function tsToTimeStr(ms, tz = 'Asia/Kuala_Lumpur') {
+function tsToTimeStr(ms, tz) {
+  if (!tz) throw new Error('tsToTimeStr called without tz');
   const d = new Date(ms + getOffsetMs(tz));
   return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
 }
@@ -85,7 +75,8 @@ function parseHM(timeStr) {
 }
 
 // "14:00" or "14" → ISO for today at that time in user's timezone
-function buildTimeISO(timeStr, tz = 'Asia/Kuala_Lumpur') {
+function buildTimeISO(timeStr, tz) {
+  if (!tz) throw new Error('buildTimeISO called without tz');
   const offsetMs = getOffsetMs(tz);
   const hm = parseHM(timeStr);
   const d = new Date(Date.now() + offsetMs);
@@ -98,37 +89,25 @@ function buildTimeISO(timeStr, tz = 'Asia/Kuala_Lumpur') {
 }
 
 // Build ISO for a specific YYYY-MM-DD date + time string in user's timezone
-function buildDateTimeISO(dateStr, timeStr, tz = 'Asia/Kuala_Lumpur') {
+function buildDateTimeISO(dateStr, timeStr, tz) {
+  if (!tz) throw new Error('buildDateTimeISO called without tz');
   const hm = parseHM(timeStr);
   const h = hm ? hm.h : 9;
   const m = hm ? hm.m : 0;
   return `${dateStr}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00${buildTzSuffix(getOffsetMs(tz))}`;
 }
 
-// UTC ms for tomorrow at HH:MM MYT
-function getTomorrowAt(hourMYT, minMYT = 0) {
-  const nowMYT = getMalaysiaDate();
-  const midnightUTC = Date.UTC(nowMYT.getUTCFullYear(), nowMYT.getUTCMonth(), nowMYT.getUTCDate() + 1) - OFFSET_MS;
-  return midnightUTC + (hourMYT * 60 + minMYT) * 60000;
-}
-
-// UTC ms for a specific date at HH:MM in given offset (defaults to MYT/UTC+8)
-function getDateAt(dateStr, hourLocal, minLocal = 0, offsetMs = OFFSET_MS) {
+// UTC ms for a specific date at HH:MM in given offset
+function getDateAt(dateStr, hourLocal, minLocal = 0, offsetMs) {
+  if (offsetMs == null) throw new Error('getDateAt called without offsetMs');
   const [yr, mo, dy] = dateStr.split('-').map(Number);
   const midnightUTC = Date.UTC(yr, mo - 1, dy) - offsetMs;
   return midnightUTC + (hourLocal * 60 + minLocal) * 60000;
 }
 
-// Today and tomorrow as YYYY-MM-DD strings
-function getTodayStr()    { return getMalaysiaDateStr(); }
-function getTomorrowStr() {
-  const d = getMalaysiaDate();
-  const tom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1));
-  return tom.toISOString().split('T')[0];
-}
-
 // Tomorrow's date string in user's timezone
-function getTomorrowStrTz(tz = 'Asia/Kuala_Lumpur') {
+function getTomorrowStrTz(tz) {
+  if (!tz) throw new Error('getTomorrowStrTz called without tz');
   const offsetMs = getOffsetMs(tz);
   const d = new Date(Date.now() + offsetMs);
   const tom = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1));
@@ -136,37 +115,26 @@ function getTomorrowStrTz(tz = 'Asia/Kuala_Lumpur') {
 }
 
 // Current datetime as ISO 8601 string with tz offset
-function nowISOTz(tz = 'Asia/Kuala_Lumpur') {
+function nowISOTz(tz) {
+  if (!tz) throw new Error('nowISOTz called without tz');
   const offsetMs = getOffsetMs(tz);
   return new Date(Date.now() + offsetMs).toISOString().slice(0, 19) + buildTzSuffix(offsetMs);
 }
 
 // "Tomorrow" relative to an activity day start timestamp (not real calendar day)
 // e.g. if user woke up April 23, activityTomorrow = April 24 even if it's now 1am April 24
-function getActivityTomorrowStr(dayStartMs, tz = 'Asia/Kuala_Lumpur') {
+function getActivityTomorrowStr(dayStartMs, tz) {
+  if (!tz) throw new Error('getActivityTomorrowStr called without tz');
   const offsetMs = getOffsetMs(tz);
   const activityDate = new Date(dayStartMs + offsetMs).toISOString().split('T')[0];
   const [y, mo, d] = activityDate.split('-').map(Number);
   return new Date(Date.UTC(y, mo - 1, d + 1)).toISOString().split('T')[0];
 }
 
-// Current MYT date/time as human-readable string for prompts
-function nowContext() {
-  const d = getMalaysiaDate();
-  const days   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const dayName  = days[d.getUTCDay()];
-  const monthStr = months[d.getUTCMonth()];
-  const dayNum   = d.getUTCDate();
-  const dateStr  = getMalaysiaDateStr();
-  const h = String(d.getUTCHours()).padStart(2,'0');
-  const m = String(d.getUTCMinutes()).padStart(2,'0');
-  return `Current time: ${dateStr} ${h}:${m} (${dayName} ${monthStr} ${dayNum}, Malaysia time MYT)`;
-}
-
-// Extract a time reference like "9am", "9:30am", "09:30" from text, return UTC ms for today at that time MYT
+// Extract a time reference like "9am", "9:30am", "09:30" from text, return UTC ms for today at that time
 // Returns null if no time found
-function extractTimeMs(text, tz = 'Asia/Kuala_Lumpur') {
+function extractTimeMs(text, tz) {
+  if (!tz) throw new Error('extractTimeMs called without tz');
   if (!text) return null;
   const offsetMs = getOffsetMs(tz);
   const offsetH  = Math.round(offsetMs / 3600000);
@@ -198,7 +166,8 @@ function extractTimeMs(text, tz = 'Asia/Kuala_Lumpur') {
 }
 
 // Detect relative date references. Returns { dateStr, dayStartMs } or null.
-function detectRetroDate(text, tz = 'Asia/Kuala_Lumpur') {
+function detectRetroDate(text, tz) {
+  if (!tz) throw new Error('detectRetroDate called without tz');
   if (!text) return null;
   const lc = text.toLowerCase();
   const offsetMs = getOffsetMs(tz);
@@ -229,10 +198,8 @@ function requireTimezone(state) {
 }
 
 module.exports = {
-  getMalaysiaISO, getMalaysiaDateStr, getMalaysiaHour, getDayOfWeek, getTodayRange,
   tsToISO, tsToTimeStr, buildTimeISO, buildDateTimeISO,
-  getTomorrowAt, getDateAt, getTodayStr, getTomorrowStr, getActivityTomorrowStr, nowContext, extractTimeMs,
-  detectRetroDate,
+  getDateAt, getActivityTomorrowStr, extractTimeMs, detectRetroDate,
   getOffsetMs, getDateStrTz, getHourTz, nowContextTz, getTomorrowStrTz, nowISOTz,
-  requireTimezone,
+  getDayOfWeekTz, requireTimezone,
 };

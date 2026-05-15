@@ -107,7 +107,7 @@ function scheduleTimedPlanReminders(chatId, planId, plan) {
   // Night before at 9 PM
   const [yr, mo, dy] = plan.date.split('-').map(Number);
   const prevDayStr = new Date(Date.UTC(yr, mo - 1, dy - 1)).toISOString().split('T')[0];
-  persist(getDateAt(prevDayStr, 21, 0), `tomorrow: ${plan.title} at ${plan.time}`, () =>
+  persist(getDateAt(prevDayStr, 21, 0, offsetMs), `tomorrow: ${plan.title} at ${plan.time}`, () =>
     cronSvc.getBotRef()?.sendMessage(chatId, `heads up — ${plan.title} tomorrow at ${plan.time}`).catch(() => {})
   );
 }
