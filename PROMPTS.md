@@ -1083,7 +1083,7 @@ OUTPUT REQUIREMENTS:
 - Length: 8-12 sentences. No markdown. Casual, direct tone.
 ---PROMPT_END--- WEEKLY_REVIEW
 
-**Call site** (`src/bot.js`): fetches `notion.getTargets(chatId)` and passes as 4th arg. Raw JSON is never passed to the prompt.
+**Call site** (`src/bot.js`): fetches `db.getTargets(chatId)` and passes as 4th arg. Raw JSON is never passed to the prompt.
 
 ---
 

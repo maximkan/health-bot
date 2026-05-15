@@ -5,7 +5,7 @@ process.chdir('/root/health-bot');
 
 const claude = require('./src/claude');
 const db = require('./src/db');
-const notion = require('./src/notion');
+const db = require('./src/db');
 
 const CHAT_ID = 119445404;
 let passed = 0, failed = 0, warnings = 0;
@@ -382,7 +382,7 @@ console.log('\n14. CORRECTION + RENAME PARSERS');
 // ────────────────────────────────────────────────────────────────
 console.log('\n15. COACH Q&A — CONTEXT ACCURACY');
 {
-  const targetsText = notion.getTargetsText(CHAT_ID);
+  const targetsText = db.getTargetsText(CHAT_ID);
   {
     const r = await claude.askCoach('What is my daily calorie target?', '', targetsText, '', {});
     check('coach knows calorie target', r, v => typeof v === 'string' && v.length > 10 && (v.includes('kcal') || v.match(/\d{3,4}/)));
@@ -402,7 +402,7 @@ console.log('\n15. COACH Q&A — CONTEXT ACCURACY');
 // ────────────────────────────────────────────────────────────────
 console.log('\n16. REPLY CHAIN OVERFLOW (8-turn conversation)');
 {
-  const targetsText = notion.getTargetsText(CHAT_ID);
+  const targetsText = db.getTargetsText(CHAT_ID);
   const messages = [
     { role: 'user', content: 'What should I eat for breakfast to hit my protein target?' },
     { role: 'assistant', content: 'For your protein target, eggs and Greek yogurt are excellent choices.' },
@@ -433,7 +433,7 @@ console.log('\n16. REPLY CHAIN OVERFLOW (8-turn conversation)');
 // ────────────────────────────────────────────────────────────────
 console.log('\n17. EVENING CHECK GENERATION');
 {
-  const targetsText = notion.getTargetsText(CHAT_ID);
+  const targetsText = db.getTargetsText(CHAT_ID);
   const state = db.getState(CHAT_ID);
   const checkData = {
     calories: 1800, protein: 140, carbs: 180, fat: 60,
@@ -456,7 +456,7 @@ console.log('\n17. EVENING CHECK GENERATION');
 // ────────────────────────────────────────────────────────────────
 console.log('\n18. DAY SUMMARY GENERATION');
 {
-  const targetsText = notion.getTargetsText(CHAT_ID);
+  const targetsText = db.getTargetsText(CHAT_ID);
   const state = db.getState(CHAT_ID);
   const dayStart = state.current_day_start || Date.now() - 8 * 3600000;
   try {
@@ -473,7 +473,7 @@ console.log('\n18. DAY SUMMARY GENERATION');
 // ────────────────────────────────────────────────────────────────
 console.log('\n19. WEEKLY REVIEW GENERATION');
 {
-  const targetsText = notion.getTargetsText(CHAT_ID);
+  const targetsText = db.getTargetsText(CHAT_ID);
   const state = db.getState(CHAT_ID);
   const sinceMs = Date.now() - 7 * 24 * 3600000;
   try {
@@ -491,7 +491,7 @@ console.log('\n19. WEEKLY REVIEW GENERATION');
 // ────────────────────────────────────────────────────────────────
 console.log('\n20. PROACTIVE PATTERNS');
 {
-  const targetsText = notion.getTargetsText(CHAT_ID);
+  const targetsText = db.getTargetsText(CHAT_ID);
   const state = db.getState(CHAT_ID);
   // Zero calorie day
   try {

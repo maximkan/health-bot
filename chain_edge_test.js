@@ -5,7 +5,7 @@ process.chdir('/root/health-bot');
 
 const claude = require('./src/claude');
 const db = require('./src/db');
-const notion = require('./src/notion');
+const db = require('./src/db');
 
 const CHAT_ID = 119445404;
 let passed = 0, failed = 0;
@@ -15,7 +15,7 @@ function ok(label) { passed++; console.log(`  ✅ ${label}`); }
 function fail(label, detail) { failed++; failures.push(`${label}: ${detail}`); console.log(`  ❌ ${label} — ${detail}`); }
 function section(t) { console.log(`\n${'═'.repeat(52)}\n  ${t}\n${'═'.repeat(52)}`); }
 
-const targetsText = notion.getTargetsText(CHAT_ID);
+const targetsText = db.getTargetsText(CHAT_ID);
 
 // Simulates the EXACT handleCoachReply logic:
 // builds messages array, pushes new user msg, calls continueCoachReply

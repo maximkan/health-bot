@@ -5,10 +5,10 @@ process.chdir('/root/health-bot');
 
 const claude = require('./src/claude');
 const db = require('./src/db');
-const notion = require('./src/notion');
+const db = require('./src/db');
 
 const CHAT_ID = 119445404;
-const targetsText = notion.getTargetsText(CHAT_ID);
+const targetsText = db.getTargetsText(CHAT_ID);
 
 function user(msg) { console.log(`\n👤 YOU: ${msg}`); }
 function bot(msg)  { console.log(`🤖 BOT: ${msg}`); }

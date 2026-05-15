@@ -69,7 +69,6 @@ addCol('user_state', 'language', 'TEXT DEFAULT "en"');
 addCol('user_state', 'onboarded', 'INTEGER DEFAULT 0');
 addCol('user_state', 'onboard_step', 'INTEGER DEFAULT 0');
 addCol('user_state', 'coaching_style', 'INTEGER DEFAULT 2');
-addCol('user_state', 'notion_enabled', 'INTEGER DEFAULT 0');
 addCol('user_state', 'gcal_refresh_token', 'TEXT');
 addCol('user_state', 'goal', 'TEXT');
 addCol('user_state', 'goal_weight_target', 'REAL');
@@ -202,13 +201,13 @@ if (!hasKnownFoodsChatId) {
   )`);
 }
 
-// ── Mark existing users as onboarded + notion_enabled ─────────────────────────
+// ── Mark existing users as onboarded ─────────────────────────────────────────
 
-db.exec(`UPDATE user_state SET onboarded=1, notion_enabled=1
+db.exec(`UPDATE user_state SET onboarded=1
   WHERE (onboarded IS NULL OR onboarded=0)
   AND chat_id IN (SELECT chat_id FROM targets)`);
 
-// ── SQLite meal / workout / sleep log (for non-Notion users) ─────────────────
+// ── SQLite meal / workout / sleep logs ───────────────────────────────────────
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS meal_log (
@@ -706,6 +705,94 @@ function setUserProfile(chatId, profile) {
   setState(chatId, { user_profile: profile });
 }
 
+// ── Targets helpers (migrated from notion.js) ─────────────────────────────────
+
+function getTargets(chatId) {
+  return getTargetsFromDb(chatId);
+}
+
+function getTargetsText(chatId) {
+  const t = getTargets(chatId);
+  return `Current weight: ~${t.weight_kg}kg, goal: ${t.goal_weight}kg\nDaily targets: ${t.calories} kcal / ${t.protein}g protein / ${t.carbs}g carbs / ${t.fat}g fat`;
+}
+
+function updateTargets(chatId, updates) {
+  setTargetsInDb(chatId, updates);
+}
+
+// ── Day data wrappers (migrated from notion.js) ───────────────────────────────
+
+function getDayData(chatId, dayStartMs) {
+  return getDayDataFromSQLite(chatId, dayStartMs);
+}
+
+function getDailyMealTotals(chatId, dayStartMs) {
+  return getDailyMealTotalsFromSQLite(chatId, dayStartMs);
+}
+
+function getDrinkEntries(chatId, dayStartMs) {
+  return getDayDataFromSQLite(chatId, dayStartMs).meals
+    .filter(m => m.type === 'Drink')
+    .map(m => ({ meal_name: m.name, caffeine_mg: 0 }));
+}
+
+// ── Known foods helpers (migrated from notion.js) ────────────────────────────
+
+function shouldSkipKnownFood(name) {
+  if (!name) return true;
+  if (name.includes('[Dinner') || name.includes('[Lunch') || name.includes('[NS Cafe]')) return true;
+  if (name.toLowerCase().includes('daily summary') || name.toLowerCase().includes('day summary')) return true;
+  if (/–\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s*\d/i.test(name)) return true;
+  return false;
+}
+
+function getKnownFoodsContext(chatId, dayOfWeek, weekType) {
+  const foods = getKnownFoodsForDay(chatId, dayOfWeek, weekType);
+  const fmt = f => `  ${f.name} (${f.serving}): ${f.calories} kcal, ${f.protein}g P, ${f.carbs}g C, ${f.fat}g F`;
+  const dinner = foods.filter(f => f.notes?.startsWith('Dinner') || f.name?.includes('[Dinner'));
+  const lunch  = foods.filter(f => !f.notes?.startsWith('Dinner') && !f.name?.includes('[Dinner') && (f.notes?.startsWith('Lunch') || f.name?.includes('Week]')));
+  const other  = foods.filter(f => !dinner.includes(f) && !lunch.includes(f));
+  const sections = [];
+  if (lunch.length)  sections.push(`LUNCH MENU TODAY:\n${lunch.map(fmt).join('\n')}`);
+  if (dinner.length) sections.push(`DINNER MENU TODAY (macros per 100g):\n${dinner.map(fmt).join('\n')}`);
+  if (other.length)  sections.push(`OTHER FOODS:\n${other.map(fmt).join('\n')}`);
+  return sections.join('\n\n');
+}
+
+function addKnownFood(chatId, data) {
+  const items = data.items;
+  if (items && items.length > 1) {
+    for (const item of items) {
+      if (shouldSkipKnownFood(item.name)) continue;
+      if (knownFoodExists(chatId, item.name)) continue;
+      upsertKnownFood(chatId, {
+        name:    item.name,
+        serving: item.weight_g ? `${item.weight_g}g` : '1 serving',
+        calories: item.calories ?? 0,
+        protein:  item.protein  ?? 0,
+        carbs:    item.carbs    ?? 0,
+        fat:      item.fat      ?? 0,
+        notes:  'Auto-saved',
+        source: 'User Logged',
+      });
+    }
+    return;
+  }
+  const name = data.meal_name;
+  if (shouldSkipKnownFood(name)) return;
+  if (knownFoodExists(chatId, name)) return;
+  upsertKnownFood(chatId, {
+    name,
+    serving:  '1 serving',
+    calories: data.totals?.calories ?? 0,
+    protein:  data.totals?.protein  ?? 0,
+    carbs:    data.totals?.carbs    ?? 0,
+    fat:      data.totals?.fat      ?? 0,
+    notes:  'Auto-saved',
+    source: 'User Logged',
+  });
+}
+
 module.exports = {
   getState, setState, addCaffeine, resetCaffeine, getAllChatIds,
   savePlan, getPendingUntimed, getPendingTimed,
@@ -726,4 +813,7 @@ upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKn
   saveBodyLog, getLastBodyMeasurement, getAllBodyMeasurements, getHistoricalDataFromSQLite,
   updateLogTime, getEntriesForDay,
   saveCoachConversation, getRecentConversationSummaries, getUserProfile, setUserProfile,
+  getTargets, getTargetsText, updateTargets,
+  getDayData, getDailyMealTotals, getDrinkEntries,
+  getKnownFoodsContext, shouldSkipKnownFood, addKnownFood,
 };

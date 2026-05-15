@@ -1,12 +1,10 @@
 const claude = require('../claude');
-const notion = require('../notion');
 
 async function handleSleep(bot, msg) {
   const chatId = msg.chat.id;
   await bot.sendChatAction(chatId, 'typing');
   try {
     const data = await claude.parseSleep(msg.text || msg.caption || '');
-    await notion.createSleepEntry(chatId, data);
     const isNap = data.type === 'Nap';
     const fmtH = (h) => { if (h == null) return '?'; const m = Math.round(h * 60); return `${Math.floor(m/60)}h ${m%60}m`; };
     const label = isNap

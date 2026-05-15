@@ -1,5 +1,4 @@
 const claude = require('../claude');
-const notion = require('../notion');
 const db     = require('../db');
 const { calculateTDEE } = require('../utils/tdee');
 
@@ -103,7 +102,6 @@ async function showWorkoutPreview(bot, msg) {
 async function logWorkout(bot, chatId, data, dayStart) {
   try {
     const workoutId = db.saveWorkoutLog(chatId, data, dayStart);
-    await notion.createWorkoutEntry(chatId, data);
     const dur = data.duration_min ? `${data.duration_min} min` : null;
     const cal = data.calories_burned ? `~${data.calories_burned} kcal` : null;
     const retro = data.date ? ` (${data.date})` : '';

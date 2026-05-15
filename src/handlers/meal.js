@@ -1,5 +1,4 @@
 const claude = require('../claude');
-const notion = require('../notion');
 const db     = require('../db');
 const { getDayOfWeek } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
@@ -51,7 +50,7 @@ async function showMealPreview(bot, msg, photos) {
     const dayOfWeek = getDayOfWeek();
     const weekType  = getCurrentWeekType();
     let knownFoodsCtx = '';
-    try { knownFoodsCtx = notion.getKnownFoodsContext(chatId, dayOfWeek, weekType); } catch {}
+    try { knownFoodsCtx = db.getKnownFoodsContext(chatId, dayOfWeek, weekType); } catch {}
 
     const { nowContext } = require('../utils/time');
     const userState = db.getState(chatId);
@@ -90,15 +89,12 @@ async function logMeal(bot, chatId, data, dayStart) {
 
     const caffeineMg = data.caffeine_mg ?? 0;
     if (caffeineMg > 0) db.addCaffeine(chatId, caffeineMg);
-    if (!data.date) notion.addKnownFood(chatId, data).catch(() => {});
-
-    // Notion is best-effort — never let it block or fail the user's confirmation
-    notion.createMealEntry(chatId, data).catch(err => console.error('Notion meal sync error:', err.message));
+    if (!data.date) { try { db.addKnownFood(chatId, data); } catch {} }
 
     let totals  = null;
     let targets = null;
     try { totals  = db.getDailyMealTotalsFromSQLite(chatId, dayStart); } catch {}
-    try { targets = notion.getTargets(chatId); } catch {}
+    try { targets = db.getTargets(chatId); } catch {}
 
     const sent = await bot.sendMessage(chatId, formatConfirmation(data, totals, targets));
     db.setLogBotMessageId('meal_log', mealId, sent.message_id);

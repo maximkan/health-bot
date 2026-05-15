@@ -1,5 +1,4 @@
 const claude = require('../claude');
-const notion = require('../notion');
 const db     = require('../db');
 
 async function handleRecovery(bot, msg) {
@@ -37,7 +36,6 @@ async function handleRecovery(bot, msg) {
             };
             if (msg._retroDate?.dateStr) row.date = msg._retroDate.dateStr;
             db.saveRecoveryLog(chatId, row, dayStart);
-            notion.createRecoveryEntry(chatId, { ...row, duration_min: s.duration_min }).catch(() => {});
           }
         }
         const totalRounds = proto.rounds.length;
@@ -68,7 +66,6 @@ async function handleRecovery(bot, msg) {
           };
           if (msg._retroDate?.dateStr) row.date = msg._retroDate.dateStr;
           db.saveRecoveryLog(chatId, row, dayStart);
-          notion.createRecoveryEntry(chatId, { ...row, duration_min: totalMin }).catch(() => {});
         }
         const parts = sessions
           .sort((a, b) => a.sequence_order - b.sequence_order)
@@ -93,7 +90,6 @@ async function handleRecovery(bot, msg) {
           };
           if (msg._retroDate?.dateStr) row.date = msg._retroDate.dateStr;
           db.saveRecoveryLog(chatId, row, dayStart);
-          notion.createRecoveryEntry(chatId, { ...row, duration_min: s.duration_min }).catch(() => {});
           const tempStr = s.temperature_c != null ? ` @ ${s.temperature_c}°C` : '';
           lines.push(`✅ ${s.type} — ${s.duration_min}min${tempStr}${retro}`);
         }

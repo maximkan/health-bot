@@ -3,7 +3,6 @@ const config  = require('./config');
 const db      = require('./db');
 const cronSvc = require('./cron');
 const claude  = require('./claude');
-const notion  = require('./notion');
 const day     = require('./handlers/day');
 const { showMealPreview, logMeal, applyCorrection, formatPreview } = require('./handlers/meal');
 const { showWorkoutPreview, logWorkout, formatWorkoutPreview, computeWorkoutCalories, formatExerciseLine } = require('./handlers/workout');
@@ -85,7 +84,6 @@ async function handleDeletion(bot, msg, chatId, userState) {
     }
 
     db.deleteTodayEntry(match);
-    notion.deleteEntry(match.pageId).catch(() => {}); // mirror to Notion best-effort
     await bot.sendMessage(chatId, `🗑 deleted: ${match.title}${match.extra ? ' — ' + match.extra : ''}`);
   } catch (err) {
     console.error('Delete error:', err.message);
@@ -280,7 +278,6 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
     const idx = parseInt(delMatch[1]) - 1;
     if (idx >= 0 && idx < state.entries.length) {
       db.deleteTodayEntry(state.entries[idx]);
-      notion.deleteEntry(state.entries[idx].pageId).catch(() => {});
       pendingStates.delete(chatId);
       await bot.sendMessage(chatId, `🗑 deleted: ${state.entries[idx].title}`);
     } else {
@@ -557,18 +554,6 @@ function startBot() {
           await routeMessage(bot, state.pendingMsg, chatId, db.getState(chatId), state.pendingIntents);
         } else {
           await maybeTriggerCatchup(bot, chatId, wakeData);
-        }
-        return;
-      }
-
-      if (state.type === 'time_correction_select') {
-        const num = parseInt((msg.text || '').trim());
-        if (!isNaN(num) && num >= 1 && num <= state.entries.length) {
-          pendingStates.delete(chatId);
-          await notion.correctEntryTime(state.entries[num - 1].pageId, state.newISO);
-          await bot.sendMessage(chatId, `✅ updated: ${state.entries[num - 1].title}`);
-        } else {
-          await bot.sendMessage(chatId, `Pick 1–${state.entries.length}.`);
         }
         return;
       }
@@ -854,7 +839,7 @@ function scheduleWeeklyReminders(bot, chatId) {
 async function handleUpdateTargets(bot, msg, chatId) {
   await bot.sendChatAction(chatId, 'typing');
   try {
-    const current = notion.getTargets(chatId);
+    const current = db.getTargets(chatId);
     // Include the last coach message as context so "yes" can resolve to the numbers just suggested
     const state = db.getState(chatId);
     let lastCoachMsg = '';
@@ -870,7 +855,7 @@ async function handleUpdateTargets(bot, msg, chatId) {
       await handleAsk(bot, msg);
       return;
     }
-    await notion.updateTargets(chatId, newTargets);
+    await db.updateTargets(chatId, newTargets);
     await bot.sendMessage(chatId,
       `✅ targets updated:\n${newTargets.calories} kcal · ${newTargets.protein}g P · ${newTargets.carbs}g C · ${newTargets.fat}g F`
     );
@@ -958,13 +943,12 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     const now = Date.now();
     const weekStartMs = now - 7 * 24 * 3600 * 1000;
     const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
-    const targetsCtx = notion.getTargetsText(chatId);
-    const targets    = notion.getTargets(chatId);
+    const targetsCtx = db.getTargetsText(chatId);
+    const targets    = db.getTargets(chatId);
 
     const review = await claude.generateWeeklyReview(weekData, targetsCtx, db.getState(chatId), targets);
     const sent = await bot.sendMessage(chatId, review);
 
-    await notion.createCoachNote(chatId, `Weekly Review — ${getDateStrTz(db.getState(chatId).timezone)}`, review, 'Weekly Review').catch(() => {});
     db.setState(chatId, {
       last_coach_message_id: sent.message_id,
       last_coach_context: JSON.stringify({ message: review, context: '', timestamp: Date.now() }),

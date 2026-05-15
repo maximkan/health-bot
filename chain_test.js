@@ -5,7 +5,7 @@ process.chdir('/root/health-bot');
 
 const claude = require('./src/claude');
 const db = require('./src/db');
-const notion = require('./src/notion');
+const db = require('./src/db');
 
 const CHAT_ID = 119445404;
 
@@ -14,7 +14,7 @@ async function main() {
   console.log('  CHAIN OVERFLOW + CONTINUITY TEST');
   console.log('══════════════════════════════════════════\n');
 
-  const targetsText = notion.getTargetsText(CHAT_ID);
+  const targetsText = db.getTargetsText(CHAT_ID);
   const state = db.getState(CHAT_ID);
   const currentProfile = db.getUserProfile(CHAT_ID);
 

@@ -1,5 +1,4 @@
 const claude  = require('../claude');
-const notion  = require('../notion');
 const gcal    = require('../gcal');
 const db      = require('../db');
 const cronSvc = require('../cron');
@@ -50,14 +49,6 @@ async function handlePlan(bot, msg) {
       });
 
       const planWithDate = { ...plan, date: planDate };
-
-      // Write to Notion
-      try {
-        const notionPage = await notion.createPlanEntry(chatId, planWithDate);
-        if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
-      } catch (err) {
-        console.error('Plan Notion write error:', err.message);
-      }
 
       // Schedule reminders
       if (plan.time && planDate) {
@@ -129,7 +120,6 @@ async function handlePlanDone(bot, msg) {
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans to mark done.'); return; }
     const plan = await claude.matchPlanToModify(msg.text, pending);
     db.updatePlanStatus(plan.id, 'done');
-    if (plan.notion_page_id) await notion.updatePlanStatusNotion(chatId, plan.notion_page_id, 'Done').catch(() => {});
     await bot.sendMessage(chatId, `✅ Done: ${plan.plan_text}. Off your list.`);
   } catch (err) {
     console.error('Plan done error:', err.message);
@@ -145,7 +135,6 @@ async function handlePlanSkip(bot, msg) {
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans.'); return; }
     const plan = await claude.matchPlanToModify(msg.text, pending);
     db.updatePlanStatus(plan.id, 'skipped');
-    if (plan.notion_page_id) await notion.updatePlanStatusNotion(chatId, plan.notion_page_id, 'Cancelled').catch(() => {});
     if (plan.gcal_event_id) {
       await gcal.deleteEvent(chatId, plan.gcal_event_id).catch(() => {});
     } else if (plan.calendar_event_created && plan.plan_date && plan.plan_time) {
@@ -189,11 +178,6 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
 
       const planWithDate = { ...plan, date: planDate };
 
-      try {
-        const notionPage = await notion.createPlanEntry(chatId, planWithDate);
-        if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
-      } catch {}
-
       if (plan.time) {
         scheduleTimedPlanReminders(chatId, planId, planWithDate);
         try {
@@ -213,28 +197,9 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
   }
 }
 
-async function syncNotionPlansToDb(chatId, dateStr) {
-  const tz = db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
-  const notionPlans = await notion.getPlansForDate(dateStr, tz).catch(() => []);
-  for (const np of notionPlans) {
-    if (np.notion_page_id && db.getPlanByNotionId(np.notion_page_id)) continue;
-    if (db.getPlanByTitleDate(chatId, np.title, dateStr)) continue;
-    const planId = db.savePlan(chatId, { text: np.title, date: dateStr, time: np.time || null, recurring: 'one-time', guests: [], location: null });
-    db.setPlanNotionId(planId, np.notion_page_id);
-    if (np.time) {
-      scheduleTimedPlanReminders(chatId, planId, { title: np.title, date: dateStr, time: np.time });
-      try {
-        const ev = await gcal.createEvent(chatId, { title: np.title, date: dateStr, time: np.time, guests: [] });
-        db.setPlanCalendar(planId);
-        if (ev?.id) db.setPlanGCalId(planId, ev.id);
-      } catch (err) { console.error('Notion→GCal sync error:', err.message); }
-    }
-  }
-}
-
 async function handleAskFallback(bot, msg) {
   const { handleAsk } = require('./ask');
   await handleAsk(bot, msg);
 }
 
-module.exports = { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans, scheduleTimedPlanReminders, syncNotionPlansToDb };
+module.exports = { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans, scheduleTimedPlanReminders };

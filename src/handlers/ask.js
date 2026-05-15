@@ -1,5 +1,4 @@
 const claude = require('../claude');
-const notion = require('../notion');
 const gcal   = require('../gcal');
 const db     = require('../db');
 const { nowContextTz, getDateStrTz, getTomorrowStrTz, getHourTz, getOffsetMs } = require('../utils/time');
@@ -155,11 +154,11 @@ async function handleAsk(bot, msg, context = '') {
     const tz = db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
 
     let targetsCtx = '';
-    try { targetsCtx = notion.getTargetsText(chatId); } catch {}
+    try { targetsCtx = db.getTargetsText(chatId); } catch {}
 
     let knownFoodsCtx = '';
     const dayOfWeek = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(Date.now() + getOffsetMs(tz)).getUTCDay()];
-    try { knownFoodsCtx = notion.getKnownFoodsContext(chatId, dayOfWeek, getCurrentWeekType(tz)); } catch {}
+    try { knownFoodsCtx = db.getKnownFoodsContext(chatId, dayOfWeek, getCurrentWeekType(tz)); } catch {}
 
     const dayCtx = await buildDayContext(chatId);
 
@@ -327,7 +326,7 @@ async function handleCoachReply(bot, msg, coachMessageId) {
     db.saveCoachMessage(chatId, 'user', msg.text || '', chainId);
 
     let targetsCtx = '';
-    try { targetsCtx = notion.getTargetsText(chatId); } catch {}
+    try { targetsCtx = db.getTargetsText(chatId); } catch {}
 
     const answer = stripMarkdown(await claude.continueCoachReply(messages, targetsCtx, state));
     const sent = await bot.sendMessage(chatId, answer);
@@ -344,7 +343,7 @@ async function handlePhotoQuestion(bot, msg, photoBase64) {
   await bot.sendChatAction(chatId, 'typing');
   try {
     let targetsCtx = '';
-    try { targetsCtx = notion.getTargetsText(chatId); } catch {}
+    try { targetsCtx = db.getTargetsText(chatId); } catch {}
     const caption = msg.caption || 'What can you tell me about this?';
     const answer = stripMarkdown(await claude.askWithPhoto(photoBase64, caption, targetsCtx));
     const sent = await bot.sendMessage(chatId, answer);

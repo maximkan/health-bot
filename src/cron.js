@@ -158,7 +158,6 @@ function isSameAlertCategory(a, b) {
 
 async function runProactiveForUser(chatId, timeLabel) {
   const claude = require('./claude');
-  const notion = require('./notion');
   const state = db.getState(chatId);
   if (state.status !== 'awake') return;
   if (db.wasRecentlyActive(chatId, 15)) return;
@@ -173,8 +172,8 @@ async function runProactiveForUser(chatId, timeLabel) {
     const minutesAwake = dayStart ? Math.floor((Date.now() - dayStart) / 60000) : 0;
     const noMeals = dayData.meals.length === 0 && minutesAwake >= 240;
 
-    const targetsCtx = notion.getTargetsText(chatId);
-    const targets = notion.getTargets(chatId);
+    const targetsCtx = db.getTargetsText(chatId);
+    const targets = db.getTargets(chatId);
 
     const todayParts = todayStr.split('-').map(Number);
     const todayUTC = new Date(Date.UTC(todayParts[0], todayParts[1] - 1, todayParts[2]));
@@ -254,7 +253,6 @@ function scheduleUntimedRemindersForUser(chatId, wakeMs) {
 
 async function runGCalSync() {
   const gcal   = require('./gcal');
-  const notion = require('./notion');
   const { scheduleTimedPlanReminders } = require('./handlers/plans');
 
   for (const chatId of db.getAllChatIds()) {
@@ -291,11 +289,6 @@ async function runGCalSync() {
           } else if (dateStr === todayStr && minsUntil > 0 && minsUntil <= 60) {
             _bot?.sendMessage(chatId, `heads up: ${event.title} at ${event.time} (in ${Math.round(minsUntil)} min)`).catch(() => {});
           }
-
-          try {
-            const notionPage = await notion.createPlanEntry(chatId, { title: event.title, date: dateStr, time: event.time });
-            if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
-          } catch (err) { console.error('GCal→Notion sync error:', err.message); }
 
           console.log(`GCal sync: picked up "${event.title}" at ${event.time} on ${dateStr}`);
         }

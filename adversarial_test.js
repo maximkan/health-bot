@@ -714,7 +714,7 @@ async function testContextInjection() {
 async function testKnownFoodsContamination() {
   section('KNOWN FOODS CONTAMINATION — Bad Entries Must Be Rejected');
 
-  const notion = require('./src/notion');
+  const db = require('./src/db');
 
   // These should be REJECTED (not saved to known_foods)
   const shouldReject = [
@@ -746,7 +746,7 @@ async function testKnownFoodsContamination() {
     for (const name of shouldReject) {
       const before = db2.db.prepare(`SELECT COUNT(*) as cnt FROM known_foods WHERE chat_id=? AND name=?`).get(CHAT_ID, name);
       try {
-        notion.addKnownFood(CHAT_ID, { name, calories: 500, protein: 30, carbs: 60, fat: 15 });
+        db.addKnownFood(CHAT_ID, { name, calories: 500, protein: 30, carbs: 60, fat: 15 });
       } catch {}
       const after = db2.db.prepare(`SELECT COUNT(*) as cnt FROM known_foods WHERE chat_id=? AND name=?`).get(CHAT_ID, name);
       check(

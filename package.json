@@ -1,7 +1,7 @@
 {
   "name": "health-bot",
   "version": "1.0.0",
-  "description": "Health & Fitness Telegram Bot with Claude + Notion",
+  "description": "Health & Fitness Telegram Bot with Claude",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.36.3",
-    "@notionhq/client": "^2.2.15",
     "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.7",
     "googleapis": "^171.4.0",

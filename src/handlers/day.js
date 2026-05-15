@@ -1,10 +1,9 @@
 const claude  = require('../claude');
-const notion  = require('../notion');
 const gcal    = require('../gcal');
 const db      = require('../db');
 const { tsToTimeStr, getActivityTomorrowStr, extractTimeMs, getOffsetMs, getDateStrTz, getTomorrowStrTz } = require('../utils/time');
 const { stripMarkdown } = require('./ask');
-const { scheduleTimedPlanReminders, syncNotionPlansToDb } = require('./plans');
+const { scheduleTimedPlanReminders } = require('./plans');
 const { calculateTDEE, sumWorkoutCalories, ageFromBirthday } = require('../utils/tdee');
 
 // ── Data summary builder ──────────────────────────────────────────────────────
@@ -135,25 +134,13 @@ async function processQuality(bot, chatId, quality, wakeData) {
   // Only log sleep if we actually know the bed time
   if (hasBed && sleepH != null) {
     try {
-      const activityDayStart = prevDayStart || bedMs;
-      const bedDateStr = new Date(activityDayStart + offsetMs).toISOString().split('T')[0];
       db.saveSleepLog(chatId, { bed_time: bedMs, wake_time: newDayStart, hours_slept: sleepH, quality, notes: '' });
-      await notion.createSleepEntry(chatId, {
-        bed_time:    tsToTimeStr(bedMs, tz),
-        wake_time:   tsToTimeStr(newDayStart, tz),
-        hours_slept: sleepH,
-        quality,
-        notes: '',
-        bed_date: bedDateStr,
-      });
     } catch (err) {
       console.error('Sleep log error:', err.message);
     }
   }
 
-  // Sync today's plans from Notion into DB before displaying
   const todayStr  = getDateStrTz(tz);
-  await syncNotionPlansToDb(chatId, todayStr).catch(() => {});
   const timedToday = db.getPendingTimed(chatId, todayStr);
   const tasks      = db.getPendingUntimed(chatId);
   const gcalToday  = await gcal.getEventsForDate(chatId, todayStr).catch(() => []);
@@ -207,8 +194,8 @@ async function handleBedTime(bot, chatId, state) {
   try {
     const dateStr     = getDateStrTz(tz);
     const dayData     = db.getDayDataFromSQLite(chatId, dayStart);
-    const targetsCtx  = notion.getTargetsText(chatId);
-    const targets     = notion.getTargets(chatId);
+    const targetsCtx  = db.getTargetsText(chatId);
+    const targets     = db.getTargets(chatId);
     const userProfile = db.getState(chatId);
 
     // TDEE / deficit calculation
@@ -237,7 +224,6 @@ async function handleBedTime(bot, chatId, state) {
     const exampleForStyle = claude.DAY_SUMMARY_EXAMPLES[summaryStyle] || claude.DAY_SUMMARY_EXAMPLES[2];
     const summaryText = stripMarkdown(await claude.generateDaySummary({ dataSummary, exampleForStyle }, userProfile));
 
-    await notion.createDailySummaryPage(chatId, dayData, summaryText, dateStr, targets).catch(err => console.error('Summary page error:', err.message));
     db.setState(chatId, { status: 'sleeping', bed_time: now });
 
     // Mention pending untimed tasks before sleep
@@ -255,7 +241,6 @@ async function handleBedTime(bot, chatId, state) {
   const tomorrow = state.current_day_start
     ? getActivityTomorrowStr(state.current_day_start, tz)
     : getTomorrowStrTz(tz);
-  await syncNotionPlansToDb(chatId, tomorrow).catch(() => {});
   const timedTomorrow = db.getPendingTimed(chatId, tomorrow);
   const gcalTomorrow  = await gcal.getEventsForDate(chatId, tomorrow).catch(() => []);
   const dbTitles = new Set(timedTomorrow.map(p => p.plan_text.toLowerCase()));
@@ -285,11 +270,11 @@ async function handleBedTime(bot, chatId, state) {
 
 async function sendEveningCheck(bot, chatId, dayStartMs) {
   try {
-    const targets = notion.getTargets(chatId);
+    const targets = db.getTargets(chatId);
     const dayData = db.getDayDataFromSQLite(chatId, dayStartMs);
     const drinkEntries = dayData.meals.filter(m => (m.caffeine ?? 0) > 0 || /drink|coffee|tea|shake|smoothie|juice/i.test(m.type || ''));
 
-    const targetsCtx = notion.getTargetsText(chatId);
+    const targetsCtx = db.getTargetsText(chatId);
     const stateNow = db.getState(chatId);
 
     // Today's pending plans
@@ -340,7 +325,6 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
     });
     db.saveCoachMessage(chatId, 'assistant', msg, sent.message_id);
 
-    await notion.createCoachNote(chatId, `Evening Check — ${todayStr}`, msg, 'Daily Evening Check').catch(() => {});
   } catch (err) {
     console.error('Evening check error:', err.message);
   }

@@ -1,5 +1,4 @@
 const claude = require('../claude');
-const notion = require('../notion');
 const db     = require('../db');
 
 async function handleBody(bot, msg) {
@@ -20,9 +19,6 @@ async function handleBody(bot, msg) {
     db.saveBodyLog(chatId, { ...data, bmi, height_cm: heightCm });
     // Keep targets.weight_kg current so TDEE and calorie burns stay accurate
     if (data.weight_kg) db.setTargetsInDb(chatId, { weight_kg: data.weight_kg });
-    if (state.notion_enabled) {
-      notion.createBodyEntry(chatId, { ...data, weight_change }).catch(err => console.error('Notion body sync error:', err.message));
-    }
 
     const lines = [`✅ ${data.weight_kg} kg${bmi ? `  ·  BMI ${bmi}` : ''}`];
     if (data.body_fat_pct != null) lines.push(`Body fat: ${data.body_fat_pct}%`);
