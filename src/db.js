@@ -126,21 +126,21 @@ if (!hasTargetsChatId) {
   const primaryChatId = db.prepare('SELECT chat_id FROM user_state LIMIT 1').get()?.chat_id;
   db.exec(`CREATE TABLE targets_v2 (
     chat_id INTEGER PRIMARY KEY,
-    calories INTEGER DEFAULT 1600,
-    protein REAL DEFAULT 220,
-    carbs REAL DEFAULT 80,
-    fat REAL DEFAULT 53,
-    weight_kg REAL DEFAULT 105,
-    goal_weight REAL DEFAULT 80,
-    height_cm REAL DEFAULT 176,
-    age INTEGER DEFAULT 26,
+    calories INTEGER,
+    protein REAL,
+    carbs REAL,
+    fat REAL,
+    weight_kg REAL,
+    goal_weight REAL,
+    height_cm REAL,
+    age INTEGER,
     birthday TEXT
   )`);
   if (primaryChatId) {
     const old = db.prepare("SELECT * FROM targets WHERE id=1").get();
     if (old) {
       db.prepare('INSERT OR IGNORE INTO targets_v2 (chat_id,calories,protein,carbs,fat,weight_kg,goal_weight,height_cm,age,birthday) VALUES (?,?,?,?,?,?,?,?,?,?)')
-        .run(primaryChatId, old.calories, old.protein, old.carbs, old.fat, old.weight_kg, old.goal_weight, old.height_cm ?? 176, old.age ?? 26, old.birthday ?? null);
+        .run(primaryChatId, old.calories, old.protein, old.carbs, old.fat, old.weight_kg, old.goal_weight, old.height_cm ?? null, old.age ?? null, old.birthday ?? null);
     }
   }
   try { db.exec('DROP TABLE targets'); } catch {}
@@ -397,11 +397,9 @@ function clearKnownFoods(chatId)  { db.prepare('DELETE FROM known_foods WHERE ch
 
 // ── Targets — per user ────────────────────────────────────────────────────────
 
-const TARGETS_DEFAULTS = { calories: 1600, protein: 220, carbs: 80, fat: 53, weight_kg: 105, goal_weight: 80, height_cm: 176, age: 26 };
-
 function getTargetsFromDb(chatId) {
-  if (!chatId) return TARGETS_DEFAULTS;
-  return db.prepare('SELECT * FROM targets WHERE chat_id=?').get(chatId) ?? TARGETS_DEFAULTS;
+  if (!chatId) return null;
+  return db.prepare('SELECT * FROM targets WHERE chat_id=?').get(chatId) ?? null;
 }
 
 function setTargetsInDb(chatId, t) {
@@ -410,9 +408,9 @@ function setTargetsInDb(chatId, t) {
     VALUES (?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(chat_id) DO UPDATE SET calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,
     fat=excluded.fat,weight_kg=excluded.weight_kg,goal_weight=excluded.goal_weight,height_cm=excluded.height_cm,age=excluded.age,birthday=excluded.birthday`)
-    .run(chatId, t.calories ?? cur.calories, t.protein ?? cur.protein, t.carbs ?? cur.carbs, t.fat ?? cur.fat,
-      t.weight_kg ?? cur.weight_kg, t.goal_weight ?? cur.goal_weight,
-      t.height_cm ?? cur.height_cm ?? 176, t.age ?? cur.age ?? 26, t.birthday ?? cur.birthday ?? null);
+    .run(chatId, t.calories ?? cur?.calories ?? null, t.protein ?? cur?.protein ?? null, t.carbs ?? cur?.carbs ?? null, t.fat ?? cur?.fat ?? null,
+      t.weight_kg ?? cur?.weight_kg ?? null, t.goal_weight ?? cur?.goal_weight ?? null,
+      t.height_cm ?? cur?.height_cm ?? null, t.age ?? cur?.age ?? null, t.birthday ?? cur?.birthday ?? null);
 }
 
 // ── Known exercises ───────────────────────────────────────────────────────────

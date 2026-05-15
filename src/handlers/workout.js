@@ -6,7 +6,8 @@ const { calculateTDEE } = require('../utils/tdee');
 function computeWorkoutCalories(chatId, data) {
   const lastBody = db.getLastBodyMeasurement(chatId);
   const targets  = db.getTargetsFromDb(chatId);
-  const weight   = lastBody?.weight_kg ?? targets.weight_kg ?? 105;
+  const weight   = lastBody?.weight_kg ?? targets?.weight_kg;
+  if (!weight) throw new Error('weight_kg missing — cannot estimate workout calories. Log a body weight or complete onboarding.');
   let dur = data.duration_min ?? 0;
   if (!dur) {
     // Estimate duration from set count when not logged
@@ -86,15 +87,16 @@ async function showWorkoutPreview(bot, msg) {
     }).join('\n');
     const body = db.getLastBodyMeasurement(chatId);
     const tgts = db.getTargetsFromDb(chatId);
-    const userWeight = body?.weight_kg ?? tgts.weight_kg ?? 80;
+    const userWeight = body?.weight_kg ?? tgts?.weight_kg;
+    if (!userWeight) throw new Error('weight_kg missing — cannot parse workout. Log a body weight or complete onboarding.');
     const data = await claude.parseWorkout(msg.text || msg.caption || '', knownCtx, userWeight);
     if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
     data.calories_burned = computeWorkoutCalories(chatId, data);
     await bot.sendMessage(chatId, formatWorkoutPreview(data));
     return data;
   } catch (err) {
-    console.error('Workout preview error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to parse workout. Try again.');
+    console.error('Workout preview error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
     return null;
   }
 }
@@ -118,8 +120,8 @@ async function logWorkout(bot, chatId, data, dayStart) {
     // Workout comparison (fire-and-forget)
     checkWorkoutProgression(bot, chatId, data).catch(() => {});
   } catch (err) {
-    console.error('Workout log error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to write to Notion. Try again.');
+    console.error('Workout log error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 

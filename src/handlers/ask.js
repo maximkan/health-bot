@@ -245,8 +245,8 @@ async function handleAsk(bot, msg, context = '') {
         const answer = stripMarkdown(await claude.generateFullAnalysis({ context: fullCtx }, targetsCtx, db.getState(chatId)));
         await bot.sendMessage(chatId, answer);
       } catch (err) {
-        console.error('Full analysis error:', err.message);
-        await bot.sendMessage(chatId, '❌ Could not pull full analysis. Try again.');
+        console.error('Full analysis error:', err.message, err.stack);
+        await bot.sendMessage(chatId, `❌ ${err.message}`);
       }
       return;
     }
@@ -276,8 +276,8 @@ async function handleAsk(bot, msg, context = '') {
       });
     }
   } catch (err) {
-    console.error('Ask handler error:', err.message);
-    await bot.sendMessage(chatId, '❌ Something went wrong. Please try again.');
+    console.error('Ask handler error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
@@ -333,8 +333,8 @@ async function handleCoachReply(bot, msg, coachMessageId) {
     db.saveCoachMessage(chatId, 'assistant', answer, chainId);
     db.setState(chatId, { last_coach_message_id: sent.message_id, current_chain_id: chainId });
   } catch (err) {
-    console.error('Coach reply error:', err.message);
-    await bot.sendMessage(chatId, '❌ Something went wrong. Please try again.');
+    console.error('Coach reply error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
@@ -353,8 +353,8 @@ async function handlePhotoQuestion(bot, msg, photoBase64) {
     db.saveCoachMessage(chatId, 'assistant', answer, chainId);
     db.setState(chatId, { last_coach_message_id: sent.message_id, current_chain_id: chainId });
   } catch (err) {
-    console.error('Photo question error:', err.message);
-    await bot.sendMessage(chatId, '❌ Something went wrong. Please try again.');
+    console.error('Photo question error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 

@@ -205,9 +205,19 @@ async function handleBedTime(bot, chatId, state) {
       const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
       const weeklyWorkouts = weekData?.trainDays ?? 3;
       const latestBody = db.getLastBodyMeasurement(chatId);
-      const currentWeight = latestBody?.weight_kg ?? t.weight_kg ?? 105;
-      const age = ageFromBirthday(t.birthday) ?? t.age ?? 26;
-      const tdee = calculateTDEE(currentWeight, t.height_cm ?? 176, age, weeklyWorkouts, userProfile.activity_level ?? 2, userProfile.gender ?? 'male');
+      const currentWeight = latestBody?.weight_kg ?? t?.weight_kg;
+      const age = ageFromBirthday(t?.birthday) ?? t?.age;
+      const height = t?.height_cm;
+      const activityLevel = userProfile.activity_level;
+      const gender = userProfile.gender;
+      const missing = [];
+      if (!currentWeight) missing.push('weight_kg');
+      if (!age) missing.push('age (or birthday)');
+      if (!height) missing.push('height_cm');
+      if (!activityLevel) missing.push('activity_level');
+      if (!gender) missing.push('gender');
+      if (missing.length) throw new Error(`Cannot compute TDEE — missing: ${missing.join(', ')}. Complete onboarding to fix.`);
+      const tdee = calculateTDEE(currentWeight, height, age, weeklyWorkouts, activityLevel, gender);
       const workoutKcal = sumWorkoutCalories(dayData.workouts);
       const eaten = Math.round(dayData.totals?.calories ?? 0);
       const netIntake = eaten - workoutKcal;
@@ -233,9 +243,9 @@ async function handleBedTime(bot, chatId, state) {
       : '';
     await bot.sendMessage(chatId, summaryText + taskNote);
   } catch (err) {
-    console.error('Bed time error:', err.message);
+    console.error('Bed time error:', err.message, err.stack);
     db.setState(chatId, { status: 'sleeping', bed_time: now });
-    await bot.sendMessage(chatId, 'logged. good work today.');
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 
   const tomorrow = state.current_day_start
@@ -292,9 +302,19 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
       const weeklyWorkoutsEv = weekDataEv?.trainDays ?? 3;
       const t2 = targets;
       const latestBodyEv = db.getLastBodyMeasurement(chatId);
-      const currentWeightEv = latestBodyEv?.weight_kg ?? t2.weight_kg ?? 105;
-      const ageEv = ageFromBirthday(t2.birthday) ?? t2.age ?? 26;
-      const tdee = calculateTDEE(currentWeightEv, t2.height_cm ?? 176, ageEv, weeklyWorkoutsEv, stateNow.activity_level ?? 2, stateNow.gender ?? 'male');
+      const currentWeightEv = latestBodyEv?.weight_kg ?? t2?.weight_kg;
+      const ageEv = ageFromBirthday(t2?.birthday) ?? t2?.age;
+      const heightEv = t2?.height_cm;
+      const activityLevelEv = stateNow.activity_level;
+      const genderEv = stateNow.gender;
+      const missingEv = [];
+      if (!currentWeightEv) missingEv.push('weight_kg');
+      if (!ageEv) missingEv.push('age (or birthday)');
+      if (!heightEv) missingEv.push('height_cm');
+      if (!activityLevelEv) missingEv.push('activity_level');
+      if (!genderEv) missingEv.push('gender');
+      if (missingEv.length) throw new Error(`Cannot compute TDEE for evening check — missing: ${missingEv.join(', ')}. Complete onboarding to fix.`);
+      const tdee = calculateTDEE(currentWeightEv, heightEv, ageEv, weeklyWorkoutsEv, activityLevelEv, genderEv);
       const workoutKcal = sumWorkoutCalories(dayData.workouts);
       const eaten = Math.round(dayData.totals?.calories ?? 0);
       const netIntake = eaten - workoutKcal;
@@ -326,7 +346,7 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
     db.saveCoachMessage(chatId, 'assistant', msg, sent.message_id);
 
   } catch (err) {
-    console.error('Evening check error:', err.message);
+    console.error('Evening check error:', err.message, err.stack);
   }
 }
 

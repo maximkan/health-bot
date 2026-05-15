@@ -23,7 +23,7 @@ async function handleCorrection(bot, msg, chatId, userState) {
     }
   } catch (err) {
     console.error('Correction error:', err.message);
-    await bot.sendMessage(chatId, '❌ Could not process correction. Try: "change time of my lunch to 2pm"');
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 

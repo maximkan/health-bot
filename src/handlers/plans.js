@@ -78,8 +78,8 @@ async function handlePlan(bot, msg) {
 
     await bot.sendMessage(chatId, confirmations.join('\n\n'));
   } catch (err) {
-    console.error('Plan handler error:', err.message);
-    await bot.sendMessage(chatId, '❌ Could not save plan. Try: "gym tomorrow at 10am"');
+    console.error('Plan handler error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
@@ -122,8 +122,8 @@ async function handlePlanDone(bot, msg) {
     db.updatePlanStatus(plan.id, 'done');
     await bot.sendMessage(chatId, `✅ Done: ${plan.plan_text}. Off your list.`);
   } catch (err) {
-    console.error('Plan done error:', err.message);
-    await bot.sendMessage(chatId, '❌ Could not update plan.');
+    console.error('Plan done error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
@@ -144,8 +144,8 @@ async function handlePlanSkip(bot, msg) {
     }
     await bot.sendMessage(chatId, `Cancelled: ${plan.plan_text}.`);
   } catch (err) {
-    console.error('Plan skip error:', err.message);
-    await bot.sendMessage(chatId, '❌ Could not cancel plan.');
+    console.error('Plan skip error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 

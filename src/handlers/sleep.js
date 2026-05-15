@@ -12,8 +12,8 @@ async function handleSleep(bot, msg) {
       : `✅ Sleep — ${data.bed_time} → ${data.wake_time} (${fmtH(data.hours_slept)}) quality ${data.quality}/5`;
     await bot.sendMessage(chatId, label);
   } catch (err) {
-    console.error('Sleep error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to log. Try: "slept at 1am, woke 8:30, quality 4"');
+    console.error('Sleep error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 

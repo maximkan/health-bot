@@ -98,8 +98,8 @@ async function handleRecovery(bot, msg) {
 
     await bot.sendMessage(chatId, lines.join('\n'));
   } catch (err) {
-    console.error('Recovery error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to log. Try: "3 rounds sauna 10min 100°C + cold plunge 3min 8°C"');
+    console.error('Recovery error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 

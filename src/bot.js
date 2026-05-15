@@ -86,8 +86,8 @@ async function handleDeletion(bot, msg, chatId, userState) {
     db.deleteTodayEntry(match);
     await bot.sendMessage(chatId, `🗑 deleted: ${match.title}${match.extra ? ' — ' + match.extra : ''}`);
   } catch (err) {
-    console.error('Delete error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to delete.');
+    console.error('Delete error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
@@ -860,8 +860,8 @@ async function handleUpdateTargets(bot, msg, chatId) {
       `✅ targets updated:\n${newTargets.calories} kcal · ${newTargets.protein}g P · ${newTargets.carbs}g C · ${newTargets.fat}g F`
     );
   } catch (err) {
-    console.error('Update targets error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to update targets. Try again.');
+    console.error('Update targets error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
@@ -876,8 +876,8 @@ async function handleCancelReminder(bot, msg, chatId) {
     db.cancelPlanReminders(chatId, plan.id);
     await bot.sendMessage(chatId, `Got it — reminder cancelled for ${plan.plan_text}. Plan is still on your list.`);
   } catch (err) {
-    console.error('Cancel reminder error:', err.message);
-    await bot.sendMessage(chatId, '❌ Could not cancel reminder.');
+    console.error('Cancel reminder error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 

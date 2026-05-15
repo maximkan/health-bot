@@ -74,10 +74,8 @@ async function showMealPreview(bot, msg, photos) {
     await bot.sendMessage(chatId, formatPreview(data));
     return data;
   } catch (err) {
-    console.error('Meal preview error:', err.message);
-    await bot.sendMessage(chatId, hasPhoto
-      ? '❌ Failed to analyze photo. Try again or describe the food in text.'
-      : '❌ Could not estimate that meal. Add more detail.');
+    console.error('Meal preview error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
     return null;
   }
 }
@@ -99,8 +97,8 @@ async function logMeal(bot, chatId, data, dayStart) {
     const sent = await bot.sendMessage(chatId, formatConfirmation(data, totals, targets));
     db.setLogBotMessageId('meal_log', mealId, sent.message_id);
   } catch (err) {
-    console.error('Meal log error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to save meal. Try again.');
+    console.error('Meal log error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
@@ -109,8 +107,8 @@ async function applyCorrection(bot, chatId, existingData, correctionText) {
   try {
     return await claude.applyMealCorrection(existingData, correctionText);
   } catch (err) {
-    console.error('Correction error:', err.message);
-    await bot.sendMessage(chatId, '❌ Could not apply correction. Try rephrasing.');
+    console.error('Correction error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
     return null;
   }
 }

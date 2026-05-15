@@ -199,7 +199,8 @@ async function analyzeMeal(photoBase64OrArray, caption, dayOfWeek, knownFoodsCon
 
 // ── Workout parsing ───────────────────────────────────────────────────────────
 
-function buildWorkoutSystem(weight_kg = 80) {
+function buildWorkoutSystem(weight_kg) {
+  if (!weight_kg) throw new Error('buildWorkoutSystem called without weight_kg');
   return `Parse the user's workout. The message may contain multiple logs (food, plans, etc) — extract ONLY the workout/exercise part.
 
 Calories = MET × ${weight_kg}kg × hours. MET values for cardio/sport:
@@ -239,7 +240,7 @@ Return ONLY JSON:
 }`;
 }
 
-async function parseWorkout(text, knownExercisesCtx = '', weight_kg = 80) {
+async function parseWorkout(text, knownExercisesCtx = '', weight_kg) {
   let content = text;
   if (knownExercisesCtx) content = `Known Custom Exercises:\n${knownExercisesCtx}\n\nWorkout: ${text}`;
   const response = await anthropic.messages.create({

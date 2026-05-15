@@ -13,7 +13,8 @@ async function handleBody(bot, msg) {
 
     // Height from targets for BMI calc
     const targets = db.getTargetsFromDb(chatId);
-    const heightCm = targets?.height_cm ?? 176;
+    const heightCm = targets?.height_cm;
+    if (!heightCm) throw new Error('height_cm missing — cannot compute BMI. Complete onboarding to fix.');
     const bmi = data.weight_kg ? +(data.weight_kg / ((heightCm / 100) ** 2)).toFixed(1) : null;
 
     db.saveBodyLog(chatId, { ...data, bmi, height_cm: heightCm });
@@ -28,8 +29,8 @@ async function handleBody(bot, msg) {
     }
     await bot.sendMessage(chatId, lines.join('\n'));
   } catch (err) {
-    console.error('Body error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to log. Try: "104.2 kg, 28% body fat"');
+    console.error('Body error:', err.message, err.stack);
+    await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
 }
 
