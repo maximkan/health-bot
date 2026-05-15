@@ -2,6 +2,75 @@ const cron = require('node-cron');
 const db   = require('./db');
 const { getOffsetMs, getDateAt, getDateStrTz, requireTimezone } = require('./utils/time');
 
+function buildProactiveDataBlock(recentData) {
+  const { today, targets, recentWeek, recentAlerts, todayAlert, caffeine_mg, last_caffeine_time, hasWorkout, last_sleep, noMealsYet, minutesAwake } = recentData;
+  const lines = [];
+
+  if (today && targets) {
+    const macroLine = (name, actual, target, dir) => {
+      if (actual == null || target == null) return `- ${name}: not logged`;
+      const diff = Math.round(actual - target);
+      if (dir === 'over'  && diff > 0)  return `- ${name}: ${Math.round(actual)} / ${target} target  [OVER ${diff}] [FLAG]`;
+      if (dir === 'under' && diff < 0)  return `- ${name}: ${Math.round(actual)} / ${target} target  [UNDER ${-diff}] [FLAG]`;
+      return `- ${name}: ${Math.round(actual)} / ${target} target  [OK]`;
+    };
+    lines.push('Today\'s macros:');
+    lines.push(macroLine('calories', today.calories, targets.calories, 'over'));
+    lines.push(macroLine('protein',  today.protein,  targets.protein,  'under'));
+    lines.push(macroLine('carbs',    today.carbs,    targets.carbs,    'over'));
+    lines.push(macroLine('fat',      today.fat,      targets.fat,      'over'));
+    lines.push('');
+  }
+
+  // Hide meals section entirely when <4h awake AND nothing logged — Claude cannot see it
+  const hideMeals = (minutesAwake < 240) && (!today?.meals || today.meals.length === 0);
+  if (!hideMeals) {
+    if (today?.meals && today.meals.length > 0) {
+      lines.push(`Today's meals (${today.meals.length}): ${today.meals.join(', ')}`);
+    } else if (noMealsYet) {
+      lines.push('Today\'s meals: NONE LOGGED in 4+ hours awake  [FLAG]');
+    }
+    lines.push('');
+  }
+
+  lines.push(`Today's workout: ${hasWorkout ? 'logged' : 'none'}`);
+  lines.push('');
+
+  const caffeineFlag = (caffeine_mg ?? 0) > 400;
+  lines.push(`Caffeine today: ${caffeine_mg ?? 0}mg${caffeineFlag ? '  [OVER 400 — FLAG]' : ''}${last_caffeine_time ? ` (last at ${last_caffeine_time})` : ''}`);
+  lines.push('');
+
+  if (last_sleep) {
+    lines.push(`Last sleep: ${last_sleep.hours}h quality ${last_sleep.quality}/5`);
+    lines.push('');
+  }
+
+  if (recentWeek) {
+    lines.push('This week so far:');
+    lines.push(`- Training days: ${recentWeek.trainDays ?? 0}`);
+    lines.push(`- Avg sleep: ${recentWeek.avgSleep ?? '?'}h, quality ${recentWeek.avgSleepQuality ?? '?'}/5`);
+    if (Array.isArray(recentWeek.dailyTotals)) {
+      const lowProteinDays = recentWeek.dailyTotals.filter(d => d.protein != null && targets?.protein && d.protein < targets.protein * 0.8).length;
+      const overCalDays    = recentWeek.dailyTotals.filter(d => d.calories != null && targets?.calories && d.calories > targets.calories * 1.1).length;
+      if (lowProteinDays >= 2) lines.push(`- Days under 80% protein target: ${lowProteinDays}  [FLAG]`);
+      if (overCalDays    >= 2) lines.push(`- Days over 110% calorie target: ${overCalDays}  [FLAG]`);
+    }
+    lines.push('');
+  }
+
+  if (todayAlert) {
+    lines.push(`Today's nudge already sent (HARD BLOCK on same category): "${todayAlert.slice(0, 120)}"`);
+    lines.push('');
+  }
+
+  if (recentAlerts?.length) {
+    lines.push('Recent assistant messages (for escalation calibration only):');
+    for (const m of recentAlerts.slice(-3)) lines.push(`- ${m.slice(0, 120)}`);
+  }
+
+  return lines.join('\n');
+}
+
 let _bot = null;
 const _onceTimers = new Map(); // key → timeout
 
@@ -199,13 +268,9 @@ async function runProactiveForUser(chatId, timeLabel) {
       ? state.last_proactive_msg : null;
 
     const lastSleep = db.getLastSleepLog(chatId);
-    // Before 4h awake, hide empty meals so Claude can't infer "nothing logged yet"
-    const mealsForData = (minutesAwake < 240 && dayData.meals.length === 0)
-      ? undefined
-      : dayData.meals.map(m => m.name);
     const recentData = {
       minutesAwake,
-      today: { ...dayData.totals, meals: mealsForData, recovery: dayData.recovery },
+      today: { ...dayData.totals, meals: dayData.meals.map(m => m.name), recovery: dayData.recovery },
       targets,
       noMealsYet: noMeals,
       caffeine_mg: state.caffeine_today_mg ?? 0,
@@ -217,7 +282,8 @@ async function runProactiveForUser(chatId, timeLabel) {
       todayAlert,
     };
 
-    const rawAlert = await claude.checkProactivePatterns(recentData, targetsCtx, state);
+    const dataBlock = buildProactiveDataBlock(recentData);
+    const rawAlert = await claude.checkProactivePatterns(dataBlock, state);
     const alert = rawAlert ? require('./handlers/ask').stripMarkdown(rawAlert) : null;
     if (alert) {
       // Server-side same-category block — Claude's reasoning cannot override this
@@ -385,4 +451,4 @@ function rescheduleAll() {
   }
 }
 
-module.exports = { init, scheduleOnce, cancelOnce, cancelAllForChat, rescheduleAll, getBotRef, scheduleBedNudgesForDay, scheduleUserDailyCrons, scheduleUntimedRemindersForUser };
+module.exports = { init, scheduleOnce, cancelOnce, cancelAllForChat, rescheduleAll, getBotRef, scheduleBedNudgesForDay, scheduleUserDailyCrons, scheduleUntimedRemindersForUser, buildProactiveDataBlock };

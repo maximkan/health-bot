@@ -1,6 +1,6 @@
 # Health Bot — Prompt Reference
 
-Literal extraction from code as of 2026-05-15 (updated 2). Do not edit by hand. Regenerate when code changes.
+Literal extraction from code as of 2026-05-15 (updated 3). Do not edit by hand. Regenerate when code changes.
 
 **Data contract:** All per-user stats (weight, height, age, gender, activity level, macro targets, goal weight) are populated during onboarding. There are no code-level defaults. Functions that need these values throw with an explicit error when called for a user with incomplete data — they do not silently substitute placeholder values.
 
@@ -314,26 +314,25 @@ weight_kg: null if bodyweight. reps: total reps if no sets specified.
 
 ### 8. WORKOUT_COMPARISON
 **File:** src/claude.js  
-**Used by:** `generateWorkoutComparison(current, previous, userProfile)`  
+**Used by:** `generateWorkoutComparison(comparisonBlock, prevDate, userProfile)` via `checkWorkoutProgression` → `buildWorkoutComparisonBlock` (src/handlers/workout.js)  
 **Model:** Sonnet  
-**Purpose:** Generates a brief progress comment comparing current workout to most recent previous session of same type.
+**Purpose:** Generates a brief progress comment from a pre-computed per-exercise comparison block.
+
+**Data assembly:** `buildWorkoutComparisonBlock(current, previous, prevDate)` in `src/handlers/workout.js` pre-computes per-exercise deltas and labels them `[UP +Xkg]`, `[DOWN -Xkg]`, `[FLAT]`, `[NEW]`, `[SKIPPED]`, plus a Verdict line. The prompt receives this block, not raw exercise arrays.
 
 Per-style example injected at call time from `WORKOUT_COMPARISON_EXAMPLES[userProfile.coaching_style] ?? WORKOUT_COMPARISON_EXAMPLES[2]`.
 
-User message (constructed at call time, `${prevDate}` and `${exampleForStyle}` resolved at runtime):
+User message (constructed at call time, `${comparisonBlock}`, `${prevDate}`, `${exampleForStyle}` resolved at runtime):
 
 ---PROMPT_START--- WORKOUT_COMPARISON
-Compare these two workouts and give a brief progress comment.
+Write a brief workout progress comment using the pre-computed comparison below.
 
-Previous workout (${prevDate}):
-${JSON.stringify(previous.exercises, null, 2)}
+${comparisonBlock}
 
-Current workout:
-${JSON.stringify(current.exercises, null, 2)}
-
-Start with a line like "nice progress since your last [workout name] session on [${prevDate}]" — or if results are mixed/worse, adjust the opener honestly (e.g. "tough one vs your ${prevDate} session").
-Then 1-2 sentences on specifics: what went up, what went down, what stayed flat. Name the exercise and the numbers.
-2-3 sentences total. Casual, direct. No markdown.
+OUTPUT REQUIREMENTS:
+- Open with one line referencing the previous session date (${prevDate}). Match the opener tone to the verdict line: positive opener if mostly UP, neutral/honest opener if mostly FLAT or DOWN.
+- Then 1–2 sentences naming specific exercises by their tag: which went UP, which went FLAT, which went DOWN. Use the numbers from the block as-is — do not recompute.
+- 2–3 sentences total. Casual, direct. No markdown.
 
 GOOD EXAMPLE (calibrated to user's coaching style):
 ${exampleForStyle}
@@ -350,27 +349,27 @@ System prompt: `buildCoachSystem('', userProfile.coaching_style, userProfile.lan
 
 ### 9. WEEKLY_STRENGTH_SUMMARY
 **File:** src/claude.js  
-**Used by:** `generateWeeklyStrengthSummary(workouts, userProfile)`  
+**Used by:** `generateWeeklyStrengthSummary(strengthBlock, userProfile)` via weekly review flow → `buildStrengthSummaryBlock` (src/handlers/workout.js)  
 **Model:** Sonnet  
-**Purpose:** Generates a strength and endurance progress summary across recent workouts.
+**Purpose:** Generates a strength and endurance progress summary from a pre-computed session/exercise block.
+
+**Data assembly:** `buildStrengthSummaryBlock(workouts)` in `src/handlers/workout.js` pre-computes session counts per bucket (this week / last week / 2 weeks ago), avg duration, and top-5 exercises with trend tags `[UP +Xkg]`, `[DOWN -Xkg]`, `[FLAT]`, `[bodyweight only]`. The prompt receives this block, not raw workout arrays.
 
 Per-style example injected at call time from `STRENGTH_SUMMARY_EXAMPLES[userProfile.coaching_style] ?? STRENGTH_SUMMARY_EXAMPLES[2]`.
 
-User message (constructed at call time, `${exampleForStyle}` resolved at runtime):
+User message (constructed at call time, `${strengthBlock}`, `${exampleForStyle}` resolved at runtime):
 
 ---PROMPT_START--- WEEKLY_STRENGTH_SUMMARY
-Analyze these workouts from the past few weeks and give a weekly strength & endurance progress summary.
+Write a weekly strength & endurance progress summary using the pre-computed data block below.
 
-Workouts (newest first):
-${JSON.stringify(workouts.map(w => ({ date: new Date(w.logged_at).toISOString().split('T')[0], name: w.workout_name, duration_min: w.duration_min, exercises: w.exercises })), null, 2)}
+${strengthBlock}
 
-Look for:
-- Strength gains: heavier weights on key lifts vs 2-4 weeks ago
-- Volume increases: more sets/reps on the same exercises
-- Endurance: longer sessions or better workout density
-- Consistency: how many gym sessions this week vs previous weeks
-
-Give a punchy 3-4 sentence summary. Highlight the biggest win and biggest opportunity. No markdown, casual tone.
+OUTPUT REQUIREMENTS:
+- 3–4 sentences, punchy, casual tone, no markdown.
+- Lead with consistency: state this-week vs last-week session count.
+- Name 1–2 specific exercises from the "Top exercises" list using their trend tag — call out a [UP +Xkg] as a win, a [DOWN -Xkg] or [FLAT] as the area to fix.
+- Close with one specific opportunity (e.g. "push deadlifts up next week" or "add a 4th session").
+- Use the numbers from the block as-is — do not recompute.
 
 GOOD EXAMPLE (calibrated to user's coaching style):
 ${exampleForStyle}
@@ -839,45 +838,38 @@ Translate the message to English. Return ONLY the English translation, nothing e
 
 ### 28. PROACTIVE_PATTERNS
 **File:** src/claude.js  
-**Used by:** `checkProactivePatterns()`  
+**Used by:** `checkProactivePatterns(dataBlock, userProfile)` via `runProactiveForUser` → `buildProactiveDataBlock` (src/cron.js)  
 **Model:** Sonnet  
 **Purpose:** Decides whether to send a proactive nudge and generates the message text.
 
-**Data assembly** (`src/cron.js`, `runProactiveForUser`):  
-- `today` — current day's totals, meals, recovery, workouts (from `current_day_start`)  
-- `recentWeek` — `dailyTotals` from `getWeekDataFromSQLite` using **current calendar week start (Monday, user's timezone)** as the window. Not a rolling 7-day window — only days since Monday are included.  
-- `targets` — structured targets object  
-- `todayAlert` — last proactive message sent today (HARD BLOCK for same category)  
-- `recentAlerts` — last 6 assistant messages from `chat_history`  
-- `noMealsYet` — true only if `minutesAwake >= 240 && meals.length === 0`  
-- When `minutesAwake < 240 && meals.length === 0`: `today.meals` is omitted entirely  
+**Data assembly** (`buildProactiveDataBlock` in `src/cron.js`):  
+- Macro lines pre-labeled `[OK]`, `[OVER N]`, or `[UNDER N]` with `[FLAG]` on flagged items  
+- Meals section omitted entirely when `minutesAwake < 240 && meals.length === 0` — Claude physically cannot see an empty meals array and cannot construct a "nothing logged yet" message  
+- `noMealsYet` line with `[FLAG]` appears only when `minutesAwake >= 240 && meals.length === 0`  
+- Week summary includes `[FLAG]` lines for days under 80% protein target (≥2 days) or over 110% calorie target (≥2 days)  
+- `todayAlert` field present when a nudge was already sent today (HARD BLOCK line)  
+- `recentAlerts` — last 3 assistant messages for escalation calibration  
 
-User message (constructed at call time):
+User message (constructed at call time, `${dataBlock}` resolved at runtime):
 
 ---PROMPT_START--- PROACTIVE_PATTERNS
-You are a proactive health coach check. Analyze the data and decide if the user needs a nudge right now.
+Decide if the user needs a proactive nudge right now, based on the pre-computed data block below.
 
-Data:
-${JSON.stringify(recentData)}
+${dataBlock}
 
-What to look for (no hardcoded rules — use judgment):
-- Meal names in recentWeek/today revealing fast food, junk food, or poor choices building up over days
-- Protein consistently below target across multiple days
-- Calories over budget multiple days in a row
-- No workouts for several days
-- No food logged 4+ hours after waking (noMealsYet: true). If minutesAwake < 240, do NOT mention missing meals regardless of what today.meals shows.
+DECISION RULES (positive, in priority order):
+- Flag the single most important issue marked [FLAG] in the block. If multiple, pick the most actionable one.
+- Match each [FLAG] to a category: "macros" (calories/protein/carbs/fat), "caffeine", "meals" (missing), "workouts" (none), or "sleep".
+- If "Today's nudge already sent" appears: that category is closed for today. Only flag a different category.
+- For tone calibration: if a similar issue appears in "Recent assistant messages" from prior days, escalate tone for a repeat ("still doing it"). If no prior message on this category, first-offense tone.
+- If no [FLAG] appears anywhere in the block: respond exactly "OK".
 
-Context rules:
-- todayAlert: HARD BLOCK. If this field is set, that category is closed for today — no matter how bad the data looks, do not flag it again. One nudge per category per day, no exceptions, no escalation overrides. The only thing allowed is a completely different category (e.g. todayAlert was about protein → you can flag caffeine or workouts, but NOT protein or calories or any other nutrition metric).
-- recentAlerts contains recent messages (may include non-proactive messages too). Use it only to calibrate tone for a NEW category you haven't flagged today: if you flagged the same thing yesterday and the pattern continues/worsens, escalate tone ("still doing it"). If improved, don't repeat.
-- First offense of a pattern: warn. Repeated offense (different day): call it out harder.
-- Only flag the single most important thing. Not multiple issues at once.
-- If nothing truly needs flagging: "OK"
-
-Respond with ONE direct, casual message (1–2 sentences, no markdown, no emojis from ** or ##). Or exactly "OK".
+OUTPUT:
+- One direct sentence (max two). Casual. No markdown.
+- Or exactly "OK" if nothing needs flagging.
 ---PROMPT_END--- PROACTIVE_PATTERNS
 
-System prompt: `buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name)`
+System prompt: `buildCoachSystem('', userProfile.coaching_style, userProfile.language, userProfile.name)`
 
 ---
 
@@ -1090,29 +1082,32 @@ OUTPUT REQUIREMENTS:
 
 ### 36. FULL_ANALYSIS
 **File:** src/claude.js  
-**Used by:** `generateFullAnalysis(allData, targetsContext, userProfile)`  
+**Used by:** `generateFullAnalysis(analysisBlock, targetsContext, userProfile)` via `handleAsk` (isFullAnalysis path) → `buildFullAnalysisBlock` (src/handlers/ask.js)  
 **Model:** Sonnet  
-**Purpose:** Generates a comprehensive all-time progress report.
+**Purpose:** Generates a comprehensive all-time progress report from a pre-computed metrics block.
 
-System prompt: `buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name)`
+**Data assembly** (`buildFullAnalysisBlock` in `src/handlers/ask.js`):  
+- Body composition: first→last weight/BF/BMI with delta and kg/week rate labeled `[UP/DOWN/FLAT Xkg]`  
+- Goal projection: remaining kg, weekly rate, projected date computed from actual rate  
+- Nutrition adherence: calorie (±10%) and protein (≥90%) hit percentages computed from `dailyTotals`  
+- Training: total sessions, sessions/week avg, top activity types by count  
+- Sleep: avg hours and avg quality from `sleep` history  
 
-User message (constructed at call time):
+User message (constructed at call time, `${analysisBlock}` resolved at runtime):
 
 ---PROMPT_START--- FULL_ANALYSIS
-Generate a comprehensive progress report since the beginning. Data:
-${JSON.stringify(allData, null, 2)}
+Write a comprehensive all-time progress report using the pre-computed block below.
 
-Cover: total weight lost, weekly rate, BMI/BF change, calorie/protein adherence %, training frequency, sleep averages, best/worst week, projected ${goalLabel} date at current rate, top 3 working + top 3 to fix.
+${analysisBlock}
+
+OUTPUT REQUIREMENTS:
+- Open with the headline: period covered + weight change (use the Body composition section).
+- Cover each section present in the block in order: body composition, goal projection (if present), nutrition adherence, training, sleep.
+- Use the numbers from the block as-is — do not recompute.
+- After the data narrative, give "Top 3 working" + "Top 3 to fix" — derive these qualitatively from the data shown.
+- Casual tone, no markdown headers, plain Telegram text.
+- Length: 10–14 sentences total.
 ---PROMPT_END--- FULL_ANALYSIS
-
-`goalLabel` is resolved before the prompt is assembled:
-```js
-const goalLabel = allData?.targets?.goal_weight
-  ? `${allData.targets.goal_weight}kg`
-  : userProfile?.goal_weight
-    ? `${userProfile.goal_weight}kg`
-    : 'goal weight';
-```
 
 ---
 
@@ -1124,3 +1119,7 @@ const goalLabel = allData?.targets?.goal_weight
 - `formatRecoveryRows(rows)` — src/claude.js:779
 - `parseJSON(text)` — src/claude.js:10
 - `fmtHours(h)` — src/handlers/day.js:102
+- `buildWorkoutComparisonBlock(current, previous, prevDate)` — src/handlers/workout.js (pre-computes per-exercise deltas for WORKOUT_COMPARISON)
+- `buildStrengthSummaryBlock(workouts)` — src/handlers/workout.js (pre-computes session counts + exercise trends for WEEKLY_STRENGTH_SUMMARY)
+- `buildProactiveDataBlock(recentData)` — src/cron.js (pre-computes labeled macro/meal/caffeine flags for PROACTIVE_PATTERNS)
+- `buildFullAnalysisBlock({bodyMeasurements, historical, targets})` — src/handlers/ask.js (pre-computes weight delta, rate, adherence %, projection for FULL_ANALYSIS)

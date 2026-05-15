@@ -964,7 +964,9 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
       const recentWorkouts = db.getRecentWorkouts(chatId, 28);
       if (recentWorkouts.length >= 2) {
         const state = db.getState(chatId);
-        const strengthSummary = await claude.generateWeeklyStrengthSummary(recentWorkouts, state);
+        const { buildStrengthSummaryBlock } = require('./handlers/workout');
+        const strengthBlock = buildStrengthSummaryBlock(recentWorkouts);
+        const strengthSummary = await claude.generateWeeklyStrengthSummary(strengthBlock, state);
         if (strengthSummary) await bot.sendMessage(chatId, strengthSummary);
       }
     } catch (err) { console.error('Weekly strength summary error:', err.message); }

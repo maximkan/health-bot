@@ -4,6 +4,105 @@ const db     = require('../db');
 const { nowContextTz, getDateStrTz, getTomorrowStrTz, getHourTz, getOffsetMs, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 
+function buildFullAnalysisBlock({ bodyMeasurements = [], historical = {}, targets = {} }) {
+  const DAY  = 24 * 3600 * 1000;
+  const WEEK = 7 * DAY;
+  const lines = [];
+
+  if (bodyMeasurements.length) {
+    const sorted = [...bodyMeasurements].sort((a, b) => new Date(a.logged_at) - new Date(b.logged_at));
+    const first = sorted[0];
+    const last  = sorted[sorted.length - 1];
+    const weeks = Math.max(1, (new Date(last.logged_at) - new Date(first.logged_at)) / WEEK);
+    const periodStart = new Date(first.logged_at).toISOString().split('T')[0];
+    const periodEnd   = new Date(last.logged_at).toISOString().split('T')[0];
+
+    lines.push(`Period: ${periodStart} to ${periodEnd} (${weeks.toFixed(1)} weeks)`);
+    lines.push('');
+    lines.push('Body composition:');
+    if (first.weight_kg != null && last.weight_kg != null) {
+      const delta = last.weight_kg - first.weight_kg;
+      const rate  = delta / weeks;
+      const dir   = delta < 0 ? 'DOWN' : delta > 0 ? 'UP' : 'FLAT';
+      lines.push(`- Weight: ${first.weight_kg}kg → ${last.weight_kg}kg  [${dir} ${Math.abs(delta).toFixed(1)}kg, ${rate >= 0 ? '+' : ''}${rate.toFixed(2)}kg/week]`);
+    }
+    if (first.body_fat_pct != null && last.body_fat_pct != null) {
+      const delta = last.body_fat_pct - first.body_fat_pct;
+      const dir   = delta < 0 ? 'DOWN' : delta > 0 ? 'UP' : 'FLAT';
+      lines.push(`- Body fat: ${first.body_fat_pct}% → ${last.body_fat_pct}%  [${dir} ${Math.abs(delta).toFixed(1)}pp]`);
+    }
+    if (first.bmi != null && last.bmi != null) {
+      const delta = last.bmi - first.bmi;
+      const dir   = delta < 0 ? 'DOWN' : delta > 0 ? 'UP' : 'FLAT';
+      lines.push(`- BMI: ${first.bmi} → ${last.bmi}  [${dir} ${Math.abs(delta).toFixed(1)}]`);
+    }
+    lines.push('');
+
+    if (targets.goal_weight && last.weight_kg != null && first.weight_kg != null) {
+      const remaining = last.weight_kg - targets.goal_weight;
+      const rate = (last.weight_kg - first.weight_kg) / weeks;
+      lines.push('Goal projection:');
+      lines.push(`- Goal weight: ${targets.goal_weight}kg`);
+      lines.push(`- Remaining: ${remaining > 0 ? `${remaining.toFixed(1)}kg to lose` : `${(-remaining).toFixed(1)}kg to gain`}`);
+      if (Math.abs(rate) > 0.05 && Math.sign(rate) === -Math.sign(remaining)) {
+        const weeksToGoal = Math.abs(remaining / rate);
+        const projectedDate = new Date(Date.now() + weeksToGoal * WEEK).toISOString().split('T')[0];
+        lines.push(`- Weekly rate: ${rate >= 0 ? '+' : ''}${rate.toFixed(2)}kg/week`);
+        lines.push(`- Projected goal date: ${projectedDate} (${weeksToGoal.toFixed(0)} weeks from now)`);
+      } else {
+        lines.push(`- Current rate (${rate >= 0 ? '+' : ''}${rate.toFixed(2)}kg/week) is not progressing toward goal`);
+      }
+      lines.push('');
+    }
+  }
+
+  const dailyTotals = historical.dailyTotals ?? [];
+  if (dailyTotals.length && targets.calories && targets.protein) {
+    const calHit  = dailyTotals.filter(d => d.calories != null && Math.abs(d.calories - targets.calories) <= targets.calories * 0.1).length;
+    const protHit = dailyTotals.filter(d => d.protein  != null && d.protein >= targets.protein * 0.9).length;
+    const total = dailyTotals.length;
+    lines.push('Nutrition adherence:');
+    lines.push(`- Calorie target hit (±10%): ${calHit} / ${total} days (${Math.round(calHit * 100 / total)}%)`);
+    lines.push(`- Protein target hit (≥90%): ${protHit} / ${total} days (${Math.round(protHit * 100 / total)}%)`);
+    lines.push('');
+  }
+
+  const workouts = historical.workouts ?? [];
+  if (workouts.length) {
+    const firstW = Math.min(...workouts.map(w => new Date(w.logged_at).getTime()));
+    const lastW  = Math.max(...workouts.map(w => new Date(w.logged_at).getTime()));
+    const weeks  = Math.max(1, (lastW - firstW) / WEEK);
+    const typeCounts = {};
+    for (const w of workouts) {
+      const t = (w.activity_type || 'other').toLowerCase();
+      typeCounts[t] = (typeCounts[t] ?? 0) + 1;
+    }
+    const topTypes = Object.entries(typeCounts).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    lines.push('Training:');
+    lines.push(`- Total sessions: ${workouts.length} (${(workouts.length / weeks).toFixed(1)} sessions/week avg)`);
+    lines.push(`- Most common: ${topTypes.map(([t, n]) => `${t} (${n})`).join(', ')}`);
+    lines.push('');
+  }
+
+  const sleep = historical.sleep ?? [];
+  if (sleep.length) {
+    const validH = sleep.filter(s => s.hours_slept != null).map(s => s.hours_slept);
+    const validQ = sleep.filter(s => s.quality     != null).map(s => s.quality);
+    if (validH.length) {
+      const avgH = (validH.reduce((s, h) => s + h, 0) / validH.length).toFixed(1);
+      lines.push('Sleep:');
+      lines.push(`- Avg hours: ${avgH}`);
+      if (validQ.length) {
+        const avgQ = (validQ.reduce((s, q) => s + q, 0) / validQ.length).toFixed(1);
+        lines.push(`- Avg quality: ${avgQ}/5`);
+      }
+      lines.push('');
+    }
+  }
+
+  return lines.join('\n').trim();
+}
+
 const FULL_ANALYSIS_TRIGGERS = [
   'full analysis','progress report','how am i doing overall','summary since beginning',
   'how\'s my progress','how is my progress','overall progress','how am i doing since',
@@ -235,14 +334,9 @@ async function handleAsk(bot, msg, context = '') {
       try {
         const bodyMeasurements = db.getAllBodyMeasurements(chatId);
         const historical = db.getHistoricalDataFromSQLite(chatId);
-        const fullCtx = [
-          dayCtx,
-          `\nBody measurements:\n${JSON.stringify(bodyMeasurements, null, 2)}`,
-          historical ? `\nAll-time daily nutrition:\n${JSON.stringify(historical.dailyTotals, null, 2)}` : '',
-          historical?.workouts?.length ? `\nWorkout history:\n${JSON.stringify(historical.workouts, null, 2)}` : '',
-          historical?.sleep?.length    ? `\nSleep history:\n${JSON.stringify(historical.sleep, null, 2)}`    : '',
-        ].join('');
-        const answer = stripMarkdown(await claude.generateFullAnalysis({ context: fullCtx }, targetsCtx, db.getState(chatId)));
+        const targets = db.getTargets(chatId);
+        const analysisBlock = buildFullAnalysisBlock({ bodyMeasurements, historical, targets });
+        const answer = stripMarkdown(await claude.generateFullAnalysis(analysisBlock, targetsCtx, db.getState(chatId)));
         await bot.sendMessage(chatId, answer);
       } catch (err) {
         console.error('Full analysis error:', err.message, err.stack);
@@ -358,4 +452,4 @@ async function handlePhotoQuestion(bot, msg, photoBase64) {
   }
 }
 
-module.exports = { handleAsk, handleCoachReply, handlePhotoQuestion, stripMarkdown, closeChain };
+module.exports = { handleAsk, handleCoachReply, handlePhotoQuestion, stripMarkdown, closeChain, buildFullAnalysisBlock };

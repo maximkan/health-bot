@@ -1,6 +1,149 @@
 const claude = require('../claude');
 const db     = require('../db');
 const { calculateTDEE } = require('../utils/tdee');
+const { getOffsetMs, requireTimezone } = require('../utils/time');
+
+function buildWorkoutComparisonBlock(current, previous, prevDate) {
+  const norm = s => String(s || '').trim().toLowerCase();
+  const fmtSet = ex => {
+    if (ex.sets_detail?.length) {
+      return ex.sets_detail.map(d => {
+        const w = d.weight_kg != null ? `${d.weight_kg}kg` : 'bw';
+        return `${d.sets}×${d.reps}@${w}`;
+      }).join(', ');
+    }
+    const w = ex.weight_kg != null ? `${ex.weight_kg}kg` : 'bw';
+    return `${ex.sets ?? '?'}×${ex.reps ?? '?'}@${w}`;
+  };
+  const topWeight = ex => {
+    if (ex.sets_detail?.length) return Math.max(...ex.sets_detail.map(d => d.weight_kg ?? 0));
+    return ex.weight_kg ?? 0;
+  };
+  const totalReps = ex => {
+    if (ex.sets_detail?.length) return ex.sets_detail.reduce((s, d) => s + (d.sets ?? 1) * (d.reps ?? 0), 0);
+    return (ex.sets ?? 1) * (ex.reps ?? 0);
+  };
+
+  const prevEx = (previous?.exercises ?? []);
+  const currEx = (current?.exercises ?? []);
+  const prevByName = new Map(prevEx.map(e => [norm(e.name), e]));
+  const currByName = new Map(currEx.map(e => [norm(e.name), e]));
+
+  const lines = [];
+  let upCount = 0, downCount = 0, flatCount = 0, newCount = 0, droppedCount = 0;
+
+  for (const ex of currEx) {
+    const key = norm(ex.name);
+    const prev = prevByName.get(key);
+    if (!prev) {
+      lines.push(`- ${ex.name}: —  →  ${fmtSet(ex)}  [NEW]`);
+      newCount++;
+      continue;
+    }
+    const prevTop = topWeight(prev);
+    const currTop = topWeight(ex);
+    const prevReps = totalReps(prev);
+    const currReps = totalReps(ex);
+
+    let tag;
+    if (currTop > prevTop)         { tag = `[UP +${(currTop - prevTop).toFixed(1)}kg top set]`; upCount++; }
+    else if (currTop < prevTop)    { tag = `[DOWN -${(prevTop - currTop).toFixed(1)}kg top set]`; downCount++; }
+    else if (currReps > prevReps)  { tag = `[UP +${currReps - prevReps} reps]`; upCount++; }
+    else if (currReps < prevReps)  { tag = `[DOWN -${prevReps - currReps} reps]`; downCount++; }
+    else                           { tag = `[FLAT]`; flatCount++; }
+
+    lines.push(`- ${ex.name}: ${fmtSet(prev)}  →  ${fmtSet(ex)}  ${tag}`);
+  }
+
+  for (const ex of prevEx) {
+    if (!currByName.has(norm(ex.name))) {
+      lines.push(`- ${ex.name}: ${fmtSet(ex)}  →  —  [SKIPPED]`);
+      droppedCount++;
+    }
+  }
+
+  const verdict = `Verdict: ${upCount} up, ${flatCount} flat, ${downCount} down, ${newCount} new, ${droppedCount} skipped.`;
+
+  return [
+    `Previous session date: ${prevDate}`,
+    `Previous workout name: ${previous?.workout_name ?? '(unknown)'}`,
+    `Current workout name: ${current?.workout_name ?? '(unknown)'}`,
+    '',
+    'Per-exercise comparison:',
+    ...lines,
+    '',
+    verdict,
+  ].join('\n');
+}
+
+function buildStrengthSummaryBlock(workouts) {
+  if (!workouts?.length) return 'No workouts logged in the period.';
+
+  const now = Date.now();
+  const DAY = 24 * 3600 * 1000;
+  const bucketOf = ms => {
+    const daysAgo = Math.floor((now - ms) / DAY);
+    if (daysAgo < 7)  return 'thisWeek';
+    if (daysAgo < 14) return 'lastWeek';
+    if (daysAgo < 21) return '2weeksAgo';
+    return 'older';
+  };
+
+  const sessions = { thisWeek: 0, lastWeek: 0, '2weeksAgo': 0, older: 0 };
+  const durSum   = { thisWeek: 0, lastWeek: 0, '2weeksAgo': 0, older: 0 };
+  const exTracker = new Map();
+
+  for (const w of workouts) {
+    const b = bucketOf(w.logged_at);
+    sessions[b]++;
+    durSum[b] += (w.duration_min ?? 0);
+
+    const exercises = Array.isArray(w.exercises) ? w.exercises
+      : (typeof w.exercises === 'string' ? JSON.parse(w.exercises || '[]') : []);
+    for (const ex of exercises) {
+      const name = String(ex.name || '').trim();
+      if (!name) continue;
+      const top = ex.sets_detail?.length
+        ? Math.max(...ex.sets_detail.map(d => d.weight_kg ?? 0))
+        : (ex.weight_kg ?? 0);
+      if (!exTracker.has(name)) exTracker.set(name, { thisWeek: 0, lastWeek: 0, '2weeksAgo': 0, older: 0, totalSessions: 0 });
+      const rec = exTracker.get(name);
+      rec[b] = Math.max(rec[b], top);
+      rec.totalSessions++;
+    }
+  }
+
+  const avgDur = b => sessions[b] ? Math.round(durSum[b] / sessions[b]) : 0;
+
+  const topExercises = [...exTracker.entries()]
+    .sort((a, b) => b[1].totalSessions - a[1].totalSessions)
+    .slice(0, 5);
+
+  const exLines = topExercises.map(([name, rec]) => {
+    const thisMax  = rec.thisWeek || rec.lastWeek;
+    const priorMax = rec.lastWeek || rec['2weeksAgo'] || rec.older;
+    let trend = '[FLAT]';
+    if (thisMax > priorMax && priorMax > 0) trend = `[UP +${(thisMax - priorMax).toFixed(1)}kg vs prior]`;
+    else if (thisMax < priorMax)            trend = `[DOWN -${(priorMax - thisMax).toFixed(1)}kg vs prior]`;
+    else if (thisMax === 0)                 trend = '[bodyweight only]';
+    return `- ${name}: ${rec.totalSessions} sessions, max ${thisMax || priorMax || 0}kg  ${trend}`;
+  });
+
+  return [
+    'Session counts:',
+    `- This week: ${sessions.thisWeek}`,
+    `- Last week: ${sessions.lastWeek}`,
+    `- 2 weeks ago: ${sessions['2weeksAgo']}`,
+    `- Older (in period): ${sessions.older}`,
+    '',
+    'Avg session duration:',
+    `- This week: ${avgDur('thisWeek')}min`,
+    `- Last week: ${avgDur('lastWeek')}min`,
+    '',
+    'Top exercises (by frequency in period):',
+    ...exLines,
+  ].join('\n');
+}
 
 // Server-side calorie calculation — overrides Claude's estimate so LLM math errors can't slip through
 function computeWorkoutCalories(chatId, data) {
@@ -142,8 +285,11 @@ async function checkWorkoutProgression(bot, chatId, currentWorkout) {
   if (!prev) return;
 
   const state = db.getState(chatId);
-  const comparison = await claude.generateWorkoutComparison(currentWorkout, prev, state);
+  const tz = requireTimezone(state);
+  const prevDate = prev.date || new Date(prev.logged_at + getOffsetMs(tz)).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+  const comparisonBlock = buildWorkoutComparisonBlock(currentWorkout, prev, prevDate);
+  const comparison = await claude.generateWorkoutComparison(comparisonBlock, prevDate, state);
   if (comparison) await bot.sendMessage(chatId, comparison);
 }
 
-module.exports = { showWorkoutPreview, logWorkout, formatWorkoutPreview, computeWorkoutCalories, formatExerciseLine };
+module.exports = { showWorkoutPreview, logWorkout, formatWorkoutPreview, computeWorkoutCalories, formatExerciseLine, buildWorkoutComparisonBlock, buildStrengthSummaryBlock };

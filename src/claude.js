@@ -1,6 +1,5 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const config = require('./config');
-const { getOffsetMs, requireTimezone } = require('./utils/time');
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -293,21 +292,16 @@ async function parseLiveExercise(text) {
 
 // ── Workout comparison ────────────────────────────────────────────────────────
 
-async function generateWorkoutComparison(current, previous, userProfile = {}) {
-  const tz = requireTimezone(userProfile);
-  const prevDate = previous.date || new Date(previous.logged_at + getOffsetMs(tz)).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+async function generateWorkoutComparison(comparisonBlock, prevDate, userProfile = {}) {
   const exampleForStyle = WORKOUT_COMPARISON_EXAMPLES[userProfile.coaching_style] ?? WORKOUT_COMPARISON_EXAMPLES[2];
-  const prompt = `Compare these two workouts and give a brief progress comment.
+  const prompt = `Write a brief workout progress comment using the pre-computed comparison below.
 
-Previous workout (${prevDate}):
-${JSON.stringify(previous.exercises, null, 2)}
+${comparisonBlock}
 
-Current workout:
-${JSON.stringify(current.exercises, null, 2)}
-
-Start with a line like "nice progress since your last [workout name] session on [${prevDate}]" — or if results are mixed/worse, adjust the opener honestly (e.g. "tough one vs your ${prevDate} session").
-Then 1-2 sentences on specifics: what went up, what went down, what stayed flat. Name the exercise and the numbers.
-2-3 sentences total. Casual, direct. No markdown.
+OUTPUT REQUIREMENTS:
+- Open with one line referencing the previous session date (${prevDate}). Match the opener tone to the verdict line: positive opener if mostly UP, neutral/honest opener if mostly FLAT or DOWN.
+- Then 1–2 sentences naming specific exercises by their tag: which went UP, which went FLAT, which went DOWN. Use the numbers from the block as-is — do not recompute.
+- 2–3 sentences total. Casual, direct. No markdown.
 
 GOOD EXAMPLE (calibrated to user's coaching style):
 ${exampleForStyle}`;
@@ -321,21 +315,19 @@ ${exampleForStyle}`;
 
 // ── Weekly strength/endurance summary ────────────────────────────────────────
 
-async function generateWeeklyStrengthSummary(workouts, userProfile = {}) {
-  if (!workouts.length) return null;
+async function generateWeeklyStrengthSummary(strengthBlock, userProfile = {}) {
+  if (!strengthBlock || strengthBlock.startsWith('No workouts')) return null;
   const exampleForStyle = STRENGTH_SUMMARY_EXAMPLES[userProfile.coaching_style] ?? STRENGTH_SUMMARY_EXAMPLES[2];
-  const prompt = `Analyze these workouts from the past few weeks and give a weekly strength & endurance progress summary.
+  const prompt = `Write a weekly strength & endurance progress summary using the pre-computed data block below.
 
-Workouts (newest first):
-${JSON.stringify(workouts.map(w => ({ date: new Date(w.logged_at).toISOString().split('T')[0], name: w.workout_name, duration_min: w.duration_min, exercises: w.exercises })), null, 2)}
+${strengthBlock}
 
-Look for:
-- Strength gains: heavier weights on key lifts vs 2-4 weeks ago
-- Volume increases: more sets/reps on the same exercises
-- Endurance: longer sessions or better workout density
-- Consistency: how many gym sessions this week vs previous weeks
-
-Give a punchy 3-4 sentence summary. Highlight the biggest win and biggest opportunity. No markdown, casual tone.
+OUTPUT REQUIREMENTS:
+- 3–4 sentences, punchy, casual tone, no markdown.
+- Lead with consistency: state this-week vs last-week session count.
+- Name 1–2 specific exercises from the "Top exercises" list using their trend tag — call out a [UP +Xkg] as a win, a [DOWN -Xkg] or [FLAT] as the area to fix.
+- Close with one specific opportunity (e.g. "push deadlifts up next week" or "add a 4th session").
+- Use the numbers from the block as-is — do not recompute.
 
 GOOD EXAMPLE (calibrated to user's coaching style):
 ${exampleForStyle}`;
@@ -1048,25 +1040,45 @@ async function generateWeeklyReview(weekData, targetsContext = '', userProfile =
 
 // ── Full analysis ─────────────────────────────────────────────────────────────
 
-async function generateFullAnalysis(allData, targetsContext = '', userProfile = {}) {
-  const goalLabel = allData?.targets?.goal_weight
-    ? `${allData.targets.goal_weight}kg`
-    : userProfile?.goal_weight
-      ? `${userProfile.goal_weight}kg`
-      : 'goal weight';
+async function generateFullAnalysis(analysisBlock, targetsContext = '', userProfile = {}) {
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 2048, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name),
-    messages: [{ role: 'user', content: `Generate a comprehensive progress report since the beginning. Data:\n${JSON.stringify(allData, null, 2)}\n\nCover: total weight lost, weekly rate, BMI/BF change, calorie/protein adherence %, training frequency, sleep averages, best/worst week, projected ${goalLabel} date at current rate, top 3 working + top 3 to fix.` }],
+    model: SONNET, max_tokens: 2048,
+    system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name),
+    messages: [{ role: 'user', content: `Write a comprehensive all-time progress report using the pre-computed block below.
+
+${analysisBlock}
+
+OUTPUT REQUIREMENTS:
+- Open with the headline: period covered + weight change (use the Body composition section).
+- Cover each section present in the block in order: body composition, goal projection (if present), nutrition adherence, training, sleep.
+- Use the numbers from the block as-is — do not recompute.
+- After the data narrative, give "Top 3 working" + "Top 3 to fix" — derive these qualitatively from the data shown.
+- Casual tone, no markdown headers, plain Telegram text.
+- Length: 10–14 sentences total.` }],
   });
   return response.content[0].text;
 }
 
 // ── Proactive pattern check ───────────────────────────────────────────────────
 
-async function checkProactivePatterns(recentData, targetsContext = '', userProfile = {}) {
+async function checkProactivePatterns(dataBlock, userProfile = {}) {
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 256, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name),
-    messages: [{ role: 'user', content: `You are a proactive health coach check. Analyze the data and decide if the user needs a nudge right now.\n\nData:\n${JSON.stringify(recentData)}\n\nWhat to look for (no hardcoded rules — use judgment):\n- Meal names in recentWeek/today revealing fast food, junk food, or poor choices building up over days\n- Protein consistently below target across multiple days\n- Calories over budget multiple days in a row\n- No workouts for several days\n- No food logged 4+ hours after waking (noMealsYet: true). If minutesAwake < 240, do NOT mention missing meals regardless of what today.meals shows.\n\nContext rules:\n- todayAlert: HARD BLOCK. If this field is set, that category is closed for today — no matter how bad the data looks, do not flag it again. One nudge per category per day, no exceptions, no escalation overrides. The only thing allowed is a completely different category (e.g. todayAlert was about protein → you can flag caffeine or workouts, but NOT protein or calories or any other nutrition metric).\n- recentAlerts contains recent messages (may include non-proactive messages too). Use it only to calibrate tone for a NEW category you haven't flagged today: if you flagged the same thing yesterday and the pattern continues/worsens, escalate tone ("still doing it"). If improved, don't repeat.\n- First offense of a pattern: warn. Repeated offense (different day): call it out harder.\n- Only flag the single most important thing. Not multiple issues at once.\n- If nothing truly needs flagging: "OK"\n\nRespond with ONE direct, casual message (1–2 sentences, no markdown, no emojis from ** or ##). Or exactly "OK".` }],
+    model: SONNET, max_tokens: 256,
+    system: buildCoachSystem('', userProfile.coaching_style, userProfile.language, userProfile.name),
+    messages: [{ role: 'user', content: `Decide if the user needs a proactive nudge right now, based on the pre-computed data block below.
+
+${dataBlock}
+
+DECISION RULES (positive, in priority order):
+- Flag the single most important issue marked [FLAG] in the block. If multiple, pick the most actionable one.
+- Match each [FLAG] to a category: "macros" (calories/protein/carbs/fat), "caffeine", "meals" (missing), "workouts" (none), or "sleep".
+- If "Today's nudge already sent" appears: that category is closed for today. Only flag a different category.
+- For tone calibration: if a similar issue appears in "Recent assistant messages" from prior days, escalate tone for a repeat ("still doing it"). If no prior message on this category, first-offense tone.
+- If no [FLAG] appears anywhere in the block: respond exactly "OK".
+
+OUTPUT:
+- One direct sentence (max two). Casual. No markdown.
+- Or exactly "OK" if nothing needs flagging.` }],
   });
   const msg = response.content[0].text.trim();
   return msg === 'OK' ? null : msg;
