@@ -17,10 +17,6 @@ const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { nowContextTz, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
 
-const CONFIRM_WORDS = ['ok','okay','yes','log','log it','✅','yep','yup','looks good','good','sure','go',
-  'ок','окей','да','хорошо','ладно','давай','логировать','логируй','запиши','сохрани','подтверждаю'];
-const CANCEL_WORDS  = ['cancel','no','nope','skip','stop','abort','нет','отмена','отменить'];
-
 const pendingStates = new Map();
 const mediaGroups   = new Map();
 
@@ -50,8 +46,6 @@ function isCancelMessage(text) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const isConfirmation = (t) => { const lc = (t||'').toLowerCase().trim(); return CONFIRM_WORDS.some(w => lc === w || lc.startsWith(w + ' ')); };
-const isCancellation = (t) => { const lc = (t||'').toLowerCase().trim(); return CANCEL_WORDS.some(w => lc === w || /^(no|nope|cancel|skip|stop|abort)[^a-z]/i.test(lc) || lc.startsWith(w + ' ')); };
 const parseQuality   = (t) => { const m = (t||'').match(/\b([1-5])\b/); return m ? parseInt(m[1]) : null; };
 
 function isWakeTrigger(msg) {
@@ -218,8 +212,9 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
       case 'WAKE':
         if (userState.status === 'sleeping') break; // handled by wake flow
         // deliberate fall-through
+      case 'FULL_ANALYSIS':
       case 'COACH_QUESTION':
-      case 'GENERAL':       await handleAsk(bot, msg);         break;
+      case 'GENERAL':       await handleAsk(bot, msg, '', intents);  break;
     }
   }
 
@@ -476,12 +471,12 @@ function startBot() {
           }
 
           if (earlyIntents.includes('COACH_QUESTION') && !earlyIntents.some(i => ['PLAN','MEAL_LOG','WORKOUT_LOG','RECOVERY_LOG'].includes(i))) {
-            await handleAsk(bot, msg);
+            await handleAsk(bot, msg, '', earlyIntents);
             return;
           }
 
           const isDone = earlyIntents.includes('GENERAL') && !earlyIntents.some(i => ['PLAN','MEAL_LOG','WORKOUT_LOG','RECOVERY_LOG'].includes(i))
-            && /^(no|nah|nope|skip|none|that'?s? it|done|nothing|all good|that's all)$/i.test((msg.text||'').trim());
+            && await claude.isDoneIntent(msg.text);
 
           if (isDone && !state.pushback_sent) {
             state.pushback_sent = true;
@@ -627,7 +622,7 @@ function startBot() {
 
       if (state.type === 'live_workout') {
         const text = (msg.text || '').trim();
-        const isDone = /^(done|finished|that'?s? (it|all)|end|finish|готово|закончил|всё)$/i.test(text);
+        const isDone = await claude.isDoneIntent(text);
 
         if (isDone && state.exercises.length === 0) {
           pendingStates.delete(chatId);
@@ -670,8 +665,7 @@ function startBot() {
 
       if (state.type === 'workout_confirm') {
         const text = msg.text || '';
-        const isWorkoutCancel = text.trim().split(/\s+/).length <= 3
-          && /^(no|nope|cancel|skip|stop|abort|nevermind|never mind)$/i.test(text.trim());
+        const isWorkoutCancel = await claude.isDeclineIntent(text);
 
         const finishWorkout = async (log) => {
           pendingStates.delete(chatId);
@@ -698,7 +692,7 @@ function startBot() {
 
         const isWCorrection = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i));
 
-        if (isConfirmation(text) && !isWCorrection) { await finishWorkout(true); return; }
+        if (!isWCorrection && await claude.isConfirmIntent(text)) { await finishWorkout(true); return; }
 
         if (isWCorrection) {
           pendingStates.delete(chatId);
@@ -715,7 +709,7 @@ function startBot() {
         }
 
         if (earlyIntents.includes('COACH_QUESTION')) {
-          await handleAsk(bot, msg, `Workout being reviewed:\n${formatWorkoutPreview(state.workoutData)}`);
+          await handleAsk(bot, msg, `Workout being reviewed:\n${formatWorkoutPreview(state.workoutData)}`, earlyIntents);
           return;
         }
 
@@ -764,7 +758,7 @@ function startBot() {
         const text = msg.text || '';
         const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
 
-        const isExplicitCancel = isCancellation(text);
+        const isExplicitCancel = await claude.isDeclineIntent(text);
         if (isExplicitCancel) {
           pendingStates.delete(chatId);
           await bot.sendMessage(chatId, '❌ Cancelled. Nothing logged.');
@@ -777,10 +771,8 @@ function startBot() {
 
         const isCorrectionIntent = earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i));
 
-        // Short standalone confirm words (≤3 words) always confirm regardless of classifier intent
-        const isShortConfirm = isConfirmation(text) && text.trim().split(/\s+/).length <= 3;
-        // Explicit confirmation → if clarification pending, show preview first; otherwise log
-        if (isShortConfirm || (isConfirmation(text) && !isCorrectionIntent)) {
+        const isConfirmed = await claude.isConfirmIntent(text);
+        if (isConfirmed && !isCorrectionIntent) {
           if (state.needsClarification) {
             // Show the preview so user sees what's being logged, then await final confirm
             setPendingState(chatId, { ...state, needsClarification: false });
@@ -808,7 +800,7 @@ function startBot() {
 
         // Question → answer with meal context, keep pending state so next reply still confirms/cancels
         if (earlyIntents.includes('COACH_QUESTION')) {
-          await handleAsk(bot, msg, `Meal being reviewed:\n${formatPreview(mealData)}`);
+          await handleAsk(bot, msg, `Meal being reviewed:\n${formatPreview(mealData)}`, earlyIntents);
           return;
         }
 
@@ -823,7 +815,7 @@ function startBot() {
       }
 
       if (state.type === 'catchup_log') {
-        const isDone = /^(no|nah|nope|skip|none|done|nothing|all good|that'?s?\s*(it|all))$/i.test((msg.text||'').trim());
+        const isDone = await claude.isDoneIntent(msg.text || '');
         if (isDone) {
           pendingStates.delete(chatId);
           return;

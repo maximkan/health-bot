@@ -1,6 +1,6 @@
 # Health Bot — Prompt Reference
 
-Literal extraction from code as of 2026-05-16 (updated 5). Do not edit by hand. Regenerate when code changes.
+Literal extraction from code as of 2026-05-16 (updated 6). Do not edit by hand. Regenerate when code changes.
 
 **Data contract:** All per-user stats (weight, height, age, gender, activity level, macro targets, goal weight) are populated during onboarding. There are no code-level defaults. Functions that need these values throw with an explicit error when called for a user with incomplete data — they do not silently substitute placeholder values.
 
@@ -25,7 +25,10 @@ Literal extraction from code as of 2026-05-16 (updated 5). Do not edit by hand. 
 | 13 | PLAN_SYSTEM | 439 |
 | 14 | IS_NO_PLAN_RESPONSE | 480 |
 | 15 | IS_POSITIVE_RESPONSE | 489 |
-| 16 | TIME_CORRECTION_SYSTEM | 497 |
+| 15a | IS_CONFIRM_INTENT | ~498 |
+| 15b | IS_DECLINE_INTENT | ~510 |
+| 15c | IS_DONE_INTENT | ~520 |
+| 16 | TIME_CORRECTION_SYSTEM | ~535 |
 | 17 | PARSE_CORRECTION | 512 |
 | 18 | APPLY_MEAL_CORRECTION | 534 |
 | 19 | PARSE_TARGET_UPDATE | 556 |
@@ -77,6 +80,7 @@ Intents:
 - CANCEL_REMINDER: cancel/turn off a reminder for a plan WITHOUT cancelling the plan ("не надо напоминать", "cancel the reminder", "don't remind me", "отмени напоминание", "no reminder needed")
 - UPDATE_TIMEZONE: changing the user's timezone ("change my timezone", "set my time to UTC+3", "поменяй время", "I'm in Moscow")
 - RENAME: renaming or relabeling a previously logged meal or workout entry ("rename my workout to X", "call that burger a big mac", "log that as golf workout")
+- FULL_ANALYSIS: asking for a comprehensive all-time progress report or deep dive ("full analysis", "how am i doing overall", "progress report", "overview since beginning", "как мой прогресс", "покажи весь прогресс", "полный анализ", "общий отчёт", "как я прогрессирую")
 - COACH_QUESTION: asking a health, nutrition, or fitness question
 - GENERAL: greeting, thanks, anything else
 
@@ -534,6 +538,42 @@ User was asked "any plans for tomorrow?". Reply YES if they mean they have no pl
 ---PROMPT_START--- IS_POSITIVE_RESPONSE
 User was asked if they want to apply suggested target changes. Reply YES if their message is any form of agreement, confirmation, or positive response. Reply NO if they are declining, asking questions, or saying something unrelated.
 ---PROMPT_END--- IS_POSITIVE_RESPONSE
+
+---
+
+### 15a. IS_CONFIRM_INTENT
+**File:** src/claude.js  
+**Used by:** `isConfirmIntent()`  
+**Model:** Haiku (fast-path sync check first)  
+**Purpose:** Language-agnostic confirmation detection. Replaces English-only `isConfirmation()` in bot.js. Used in workout_confirm and meal_confirm flows.
+
+---PROMPT_START--- IS_CONFIRM_INTENT
+User was asked to confirm or save something. Reply YES if their message is any form of agreement or confirmation in any language. Reply NO if they decline, want to edit or change something, ask a question, or say something unrelated.
+---PROMPT_END--- IS_CONFIRM_INTENT
+
+---
+
+### 15b. IS_DECLINE_INTENT
+**File:** src/claude.js  
+**Used by:** `isDeclineIntent()`  
+**Model:** Haiku (fast-path sync check first)  
+**Purpose:** Language-agnostic cancel/refusal detection. Replaces English-only `isCancellation()` and workout cancel regex in bot.js.
+
+---PROMPT_START--- IS_DECLINE_INTENT
+User was asked to do something. Reply YES if their message is any form of refusal, cancellation, or wanting to skip/stop in any language. Reply NO if they agree, ask a question, or say something unrelated.
+---PROMPT_END--- IS_DECLINE_INTENT
+
+---
+
+### 15c. IS_DONE_INTENT
+**File:** src/claude.js  
+**Used by:** `isDoneIntent()`  
+**Model:** Haiku (fast-path sync check first)  
+**Purpose:** Language-agnostic "I'm finished" detection. Replaces inline English regex at live_workout, catchup_log, and bed_plans isDone checks in bot.js.
+
+---PROMPT_START--- IS_DONE_INTENT
+User is in a multi-step flow and was asked if they are finished. Reply YES if their message means they are done/finished/completed or have nothing more to add, in any language. Reply NO if they are still going, logging more items, or saying something unrelated.
+---PROMPT_END--- IS_DONE_INTENT
 
 ---
 

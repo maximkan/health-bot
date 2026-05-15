@@ -103,12 +103,6 @@ function buildFullAnalysisBlock({ bodyMeasurements = [], historical = {}, target
   return lines.join('\n').trim();
 }
 
-const FULL_ANALYSIS_TRIGGERS = [
-  'full analysis','progress report','how am i doing overall','summary since beginning',
-  'how\'s my progress','how is my progress','overall progress','how am i doing since',
-  'since the start','since i started','progress so far','how have i been doing',
-  'trend analysis','show me my progress','give me a full breakdown',
-];
 
 // Extract how many days back the question needs — data extraction only, not intent detection
 function parseDaysFromQuery(text) {
@@ -241,13 +235,12 @@ function stripMarkdown(text) {
     .trim();
 }
 
-async function handleAsk(bot, msg, context = '') {
+async function handleAsk(bot, msg, context = '', intents = []) {
   const chatId = msg.chat.id;
   await bot.sendChatAction(chatId, 'typing');
   const text = msg.text || msg.caption || '';
 
-  const lc = text.toLowerCase();
-  const isFullAnalysis = FULL_ANALYSIS_TRIGGERS.some(t => lc.includes(t));
+  const isFullAnalysis = intents.includes('FULL_ANALYSIS');
 
   try {
     const tz = requireTimezone(db.getState(chatId));

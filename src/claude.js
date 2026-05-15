@@ -37,6 +37,7 @@ Intents:
 - CANCEL_REMINDER: cancel/turn off a reminder for a plan WITHOUT cancelling the plan ("не надо напоминать", "cancel the reminder", "don't remind me", "отмени напоминание", "no reminder needed")
 - UPDATE_TIMEZONE: changing the user's timezone ("change my timezone", "set my time to UTC+3", "поменяй время", "I'm in Moscow")
 - RENAME: renaming or relabeling a previously logged meal or workout entry ("rename my workout to X", "call that burger a big mac", "log that as golf workout")
+- FULL_ANALYSIS: asking for a comprehensive all-time progress report or deep dive ("full analysis", "how am i doing overall", "progress report", "overview since beginning", "как мой прогресс", "покажи весь прогресс", "полный анализ", "общий отчёт", "как я прогрессирую")
 - COACH_QUESTION: asking a health, nutrition, or fitness question
 - GENERAL: greeting, thanks, anything else
 
@@ -83,7 +84,7 @@ async function classify(text, history = []) {
     const arr = JSON.parse(match[0]);
     const VALID = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_START','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG',
       'WEIGHT_LOG','BED','WAKE','PLAN','PLAN_DONE','PLAN_SKIP','CORRECTION','DELETE','UPDATE_TARGETS',
-      'CANCEL_REMINDER','UPDATE_TIMEZONE','RENAME','COACH_QUESTION','GENERAL']);
+      'CANCEL_REMINDER','UPDATE_TIMEZONE','RENAME','FULL_ANALYSIS','COACH_QUESTION','GENERAL']);
     const filtered = arr.filter(i => VALID.has(i));
     return filtered.length ? filtered : ['GENERAL'];
   } catch { return ['GENERAL']; }
@@ -491,6 +492,42 @@ async function isPositiveResponse(text) {
     model: HAIKU, max_tokens: 10,
     system: 'User was asked if they want to apply suggested target changes. Reply YES if their message is any form of agreement, confirmation, or positive response. Reply NO if they are declining, asking questions, or saying something unrelated.',
     messages: [{ role: 'user', content: text }],
+  });
+  return resp.content[0].text.trim().toUpperCase().startsWith('Y');
+}
+
+async function isConfirmIntent(text) {
+  if (!text) return false;
+  const t = String(text).trim();
+  if (/^(ok|okay|k|yes|yep|yup|y|sure|go|do it|log it|log|confirm|✅|👍|да|ок|окей|хорошо|ладно|давай|записывай|логируй|запиши|сохрани|подтверждаю)$/i.test(t)) return true;
+  const resp = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 10,
+    system: 'User was asked to confirm or save something. Reply YES if their message is any form of agreement or confirmation in any language. Reply NO if they decline, want to edit or change something, ask a question, or say something unrelated.',
+    messages: [{ role: 'user', content: t }],
+  });
+  return resp.content[0].text.trim().toUpperCase().startsWith('Y');
+}
+
+async function isDeclineIntent(text) {
+  if (!text) return false;
+  const t = String(text).trim();
+  if (/^(no|nope|n|cancel|stop|skip|abort|нет|отмена|отменить|не\s+надо|неважно|пропусти)$/i.test(t)) return true;
+  const resp = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 10,
+    system: 'User was asked to do something. Reply YES if their message is any form of refusal, cancellation, or wanting to skip/stop in any language. Reply NO if they agree, ask a question, or say something unrelated.',
+    messages: [{ role: 'user', content: t }],
+  });
+  return resp.content[0].text.trim().toUpperCase().startsWith('Y');
+}
+
+async function isDoneIntent(text) {
+  if (!text) return false;
+  const t = String(text).trim();
+  if (/^(done|finished|finish|end|that'?s?\s*(it|all)|all done|all good|nothing|none|no|nah|nope|skip|готово|закончил|завершил|всё|все|хватит|ничего|нет)$/i.test(t)) return true;
+  const resp = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 10,
+    system: 'User is in a multi-step flow and was asked if they are finished. Reply YES if their message means they are done/finished/completed or have nothing more to add, in any language. Reply NO if they are still going, logging more items, or saying something unrelated.',
+    messages: [{ role: 'user', content: t }],
   });
   return resp.content[0].text.trim().toUpperCase().startsWith('Y');
 }
@@ -1157,7 +1194,7 @@ module.exports = {
   analyzeMeal, applyMealCorrection, parseTargetUpdate, recalculateTargets,
   parseWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseBody,
   parseLiveExercise, generateWorkoutComparison, generateWeeklyStrengthSummary,
-  parsePlans, isNoPlanResponse, isPositiveResponse, parseTimeCorrection, parseCorrection,
+  parsePlans, isNoPlanResponse, isPositiveResponse, isConfirmIntent, isDeclineIntent, isDoneIntent, parseTimeCorrection, parseCorrection,
   askCoach, askWithPhoto, continueCoachReply,
   generateDaySummary, generateEveningCheck, generateWeeklyReview, buildWeekSummary, formatRecoveryRows,
   DAY_SUMMARY_EXAMPLES, EVENING_CHECK_EXAMPLES, STRENGTH_SUMMARY_EXAMPLES, WORKOUT_COMPARISON_EXAMPLES,
