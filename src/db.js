@@ -111,7 +111,6 @@ if (!hasNewPlans) {
     status TEXT DEFAULT 'pending',
     recurring TEXT DEFAULT 'one-time',
     last_reminded TEXT,
-    notion_page_id TEXT,
     calendar_event_created INTEGER DEFAULT 0,
     guests TEXT,
     location TEXT,
@@ -322,10 +321,8 @@ function savePlan(chatId, { text, date, time, recurring = 'one-time', guests, lo
 const getPendingUntimed = (chatId)       => db.prepare("SELECT * FROM plans WHERE chat_id=? AND plan_time IS NULL AND status='pending' ORDER BY created_at ASC").all(chatId);
 const getPendingTimed   = (chatId, date) => db.prepare("SELECT * FROM plans WHERE chat_id=? AND plan_date=? AND plan_time IS NOT NULL AND status IN ('pending','reminded') ORDER BY plan_time ASC").all(chatId, date);
 const updatePlanStatus  = (id, status)   => db.prepare("UPDATE plans SET status=? WHERE id=?").run(status, id);
-const setPlanNotionId   = (id, pageId)   => db.prepare("UPDATE plans SET notion_page_id=? WHERE id=?").run(pageId, id);
 const setPlanCalendar   = (id)           => db.prepare("UPDATE plans SET calendar_event_created=1 WHERE id=?").run(id);
 const setPlanGCalId     = (id, eventId)  => db.prepare('UPDATE plans SET gcal_event_id=? WHERE id=?').run(eventId, id);
-const getPlanByNotionId  = (pageId)             => db.prepare("SELECT id FROM plans WHERE notion_page_id=? LIMIT 1").get(pageId);
 const getPlanByTitleDate = (chatId, text, date) => db.prepare("SELECT id FROM plans WHERE chat_id=? AND plan_text=? AND plan_date=? LIMIT 1").get(chatId, text, date);
 const getLastPending    = (chatId)       => db.prepare("SELECT * FROM plans WHERE chat_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1").get(chatId);
 const getAllPending      = (chatId)       => db.prepare("SELECT * FROM plans WHERE chat_id=? AND status NOT IN ('done','skipped') ORDER BY plan_date,plan_time").all(chatId);
@@ -816,8 +813,8 @@ function addKnownFood(chatId, data) {
 module.exports = {
   getState, setState, addCaffeine, resetCaffeine, getAllChatIds,
   savePlan, getPendingUntimed, getPendingTimed,
-  getPlanByNotionId, getPlanByTitleDate,
-  updatePlanStatus, setPlanNotionId, setPlanCalendar, setPlanGCalId,
+  getPlanByTitleDate,
+  updatePlanStatus, setPlanCalendar, setPlanGCalId,
   getLastPending, getAllPending,
   saveCoachMessage, getReplyChain, countExchanges, clearReplyChain,
   logMessage, wasRecentlyActive,

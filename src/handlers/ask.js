@@ -327,7 +327,7 @@ async function handleAsk(bot, msg, context = '') {
       }
     } catch {}
 
-    const notionCtx = [dayCtx, context, histCtx, recentChainCtx].filter(Boolean).join('\n');
+    const coachCtx = [dayCtx, context, histCtx, recentChainCtx].filter(Boolean).join('\n');
 
     if (isFullAnalysis) {
       await bot.sendMessage(chatId, 'pulling all your data...');
@@ -353,7 +353,7 @@ async function handleAsk(bot, msg, context = '') {
     db.saveCoachMessage(chatId, 'user', text, chainId);
 
     const userProfile = freshState;
-    const answer = stripMarkdown(await claude.askCoach(text, notionCtx, targetsCtx, knownFoodsCtx, userProfile));
+    const answer = stripMarkdown(await claude.askCoach(text, coachCtx, targetsCtx, knownFoodsCtx, userProfile));
     const sent = await bot.sendMessage(chatId, answer);
 
     // Save assistant message and update chain state
@@ -366,7 +366,7 @@ async function handleAsk(bot, msg, context = '') {
       db.setState(chatId, {
         last_coach_message_id: sent.message_id,
         current_chain_id: chainId,
-        last_coach_context: JSON.stringify({ message: answer, context: notionCtx, timestamp: Date.now() }),
+        last_coach_context: JSON.stringify({ message: answer, context: coachCtx, timestamp: Date.now() }),
       });
     }
   } catch (err) {
