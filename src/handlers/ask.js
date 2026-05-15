@@ -1,7 +1,7 @@
 const claude = require('../claude');
 const gcal   = require('../gcal');
 const db     = require('../db');
-const { nowContextTz, getDateStrTz, getTomorrowStrTz, getHourTz, getOffsetMs } = require('../utils/time');
+const { nowContextTz, getDateStrTz, getTomorrowStrTz, getHourTz, getOffsetMs, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 
 const FULL_ANALYSIS_TRIGGERS = [
@@ -74,7 +74,7 @@ function formatRecoveryRows(rows) {
 
 async function buildDayContext(chatId) {
   const state    = db.getState(chatId);
-  const tz       = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
   const todayStr = getDateStrTz(tz);
   const lines    = [nowContextTz(tz)];
 
@@ -151,7 +151,7 @@ async function handleAsk(bot, msg, context = '') {
   const isFullAnalysis = FULL_ANALYSIS_TRIGGERS.some(t => lc.includes(t));
 
   try {
-    const tz = db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+    const tz = requireTimezone(db.getState(chatId));
 
     let targetsCtx = '';
     try { targetsCtx = db.getTargetsText(chatId); } catch {}

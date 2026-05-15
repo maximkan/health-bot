@@ -24,7 +24,7 @@ function getHourTz(timezone) {
 function nowContextTz(timezone) {
   const off  = getOffsetMs(timezone);
   const d    = new Date(Date.now() + off);
-  let tzLabel = timezone || 'Asia/Kuala_Lumpur';
+  let tzLabel = timezone;
   try {
     const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, timeZoneName: 'short' }).formatToParts(new Date());
     tzLabel = parts.find(p => p.type === 'timeZoneName')?.value || tzLabel;
@@ -221,10 +221,18 @@ function detectRetroDate(text, tz = 'Asia/Kuala_Lumpur') {
   return null;
 }
 
+function requireTimezone(state) {
+  if (!state?.timezone) {
+    throw new Error('timezone missing — complete onboarding to fix.');
+  }
+  return state.timezone;
+}
+
 module.exports = {
   getMalaysiaISO, getMalaysiaDateStr, getMalaysiaHour, getDayOfWeek, getTodayRange,
   tsToISO, tsToTimeStr, buildTimeISO, buildDateTimeISO,
   getTomorrowAt, getDateAt, getTodayStr, getTomorrowStr, getActivityTomorrowStr, nowContext, extractTimeMs,
   detectRetroDate,
   getOffsetMs, getDateStrTz, getHourTz, nowContextTz, getTomorrowStrTz, nowISOTz,
+  requireTimezone,
 };

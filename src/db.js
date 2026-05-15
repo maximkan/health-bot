@@ -77,7 +77,7 @@ addCol('user_state', 'activity_level', 'INTEGER DEFAULT 2');
 addCol('user_state', 'gym_days', 'INTEGER DEFAULT 3');
 addCol('user_state', 'bed_time_pref', 'TEXT');
 addCol('user_state', 'wake_time_pref', 'TEXT');
-addCol('user_state', 'timezone', 'TEXT DEFAULT "Asia/Kuala_Lumpur"');
+addCol('user_state', 'timezone', 'TEXT');
 addCol('user_state', 'gender', 'TEXT DEFAULT "male"');
 addCol('user_state', 'last_proactive_date', 'TEXT');
 addCol('user_state', 'last_proactive_msg', 'TEXT');
@@ -497,7 +497,8 @@ function deleteTodayEntry(entry) {
 
 function getWeekDataFromSQLite(chatId, sinceMs) {
   const { getOffsetMs } = require('./utils/time');
-  const tz     = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone || 'Asia/Kuala_Lumpur';
+  const tz = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone;
+  if (!tz) throw new Error(`timezone missing for chat ${chatId} — complete onboarding to fix.`);
   const OFFSET = getOffsetMs(tz);
   const meals      = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
   const workouts   = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
@@ -659,7 +660,8 @@ function getHistoricalDataFromSQLite(chatId) {
   const recoveries = db.prepare('SELECT * FROM recovery_log WHERE chat_id=? ORDER BY logged_at ASC').all(chatId);
 
   const { getOffsetMs } = require('./utils/time');
-  const tz     = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone || 'Asia/Kuala_Lumpur';
+  const tz = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone;
+  if (!tz) throw new Error(`timezone missing for chat ${chatId} — complete onboarding to fix.`);
   const OFFSET = getOffsetMs(tz);
   const dailyTotals = {};
   for (const m of meals) {

@@ -284,7 +284,11 @@ async function handleOnboarding(bot, msg) {
       'seoul': 'Asia/Seoul', 'sydney': 'Australia/Sydney',
     };
     const lc = text.toLowerCase();
-    const tz = TIMEZONE_MAP[lc] || TIMEZONE_MAP[Object.keys(TIMEZONE_MAP).find(k => lc.includes(k))] || 'Asia/Kuala_Lumpur';
+    const tz = TIMEZONE_MAP[lc] || TIMEZONE_MAP[Object.keys(TIMEZONE_MAP).find(k => lc.includes(k))];
+    if (!tz) {
+      await bot.sendMessage(chatId, "Couldn't recognize that timezone. Try: 'GMT+8', 'New York', 'Kuala Lumpur', or your country name.");
+      return;
+    }
     db.setState(chatId, { timezone: tz, onboard_step: S.GCAL });
 
     const gcalUrl = `${config.gcalAuthUrl}/auth/gcal?user=${chatId}`;

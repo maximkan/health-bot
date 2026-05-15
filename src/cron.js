@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const db   = require('./db');
-const { getOffsetMs, getDateAt, getDateStrTz } = require('./utils/time');
+const { getOffsetMs, getDateAt, getDateStrTz, requireTimezone } = require('./utils/time');
 
 let _bot = null;
 const _onceTimers = new Map(); // key → timeout
@@ -34,7 +34,7 @@ function init(bot) {
 
 function scheduleUserDailyCrons(chatId) {
   const state = db.getState(chatId);
-  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
   const opts = { timezone: tz };
   // Evening check at 19:30 in user's local time
   cron.schedule('30 19 * * *', () => runEveningCheckForUser(chatId), opts);
@@ -49,7 +49,7 @@ function scheduleUserDailyCrons(chatId) {
 
 function scheduleProactiveForDay(chatId) {
   const state = db.getState(chatId);
-  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
   const offsetMs = getOffsetMs(tz);
   const todayStr = getDateStrTz(tz);
   const windows = [[10, 13], [14, 17], [19, 21]];
@@ -82,7 +82,7 @@ function scheduleBedNudgesForDay(chatId) {
   const state = db.getState(chatId);
   if (state.status !== 'awake') return;
 
-  const tz       = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
   const offsetMs = getOffsetMs(tz);
 
   let bedH = 0, bedM = 30; // default 00:30 user-local time
@@ -162,7 +162,7 @@ async function runProactiveForUser(chatId, timeLabel) {
   if (state.status !== 'awake') return;
   if (db.wasRecentlyActive(chatId, 15)) return;
 
-  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
   const todayStr = getDateStrTz(tz);
 
   try {
@@ -257,7 +257,7 @@ async function runGCalSync() {
 
   for (const chatId of db.getAllChatIds()) {
     const state = db.getState(chatId);
-    const tz = state.timezone || 'Asia/Kuala_Lumpur';
+    const tz = requireTimezone(state);
     const { getDateStrTz, getTomorrowStrTz } = require('./utils/time');
     const todayStr    = getDateStrTz(tz);
     const tomorrowStr = getTomorrowStrTz(tz);

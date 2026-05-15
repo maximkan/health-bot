@@ -15,7 +15,7 @@ const { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans } = require(
 const { handleOnboarding } = require('./handlers/onboarding');
 const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
-const { nowContext, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz } = require('./utils/time');
+const { nowContext, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
 
 const CONFIRM_WORDS = ['ok','okay','yes','log','log it','✅','yep','yup','looks good','good','sure','go',
   'ок','окей','да','хорошо','ладно','давай','логировать','логируй','запиши','сохрани','подтверждаю'];
@@ -92,7 +92,7 @@ async function handleDeletion(bot, msg, chatId, userState) {
 }
 
 async function maybeTriggerCatchup(bot, chatId, wakeData) {
-  const tz = db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(db.getState(chatId));
   const offsetMs = getOffsetMs(tz);
   // Always offer the calendar day before today in the user's timezone — not prevDayStart,
   // which would be wrong if they skipped a day entirely.
@@ -265,9 +265,9 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
   if (msg.text.startsWith('/')) {
     if (msg.text === '/start')             await sendHelp(bot, chatId);
     else if (msg.text === '/today')        await handleToday(bot, chatId, dayStart);
-    else if (msg.text === '/setweek odd')  { setWeekType('odd');  await bot.sendMessage(chatId, '✅ Odd week set.'); }
-    else if (msg.text === '/setweek even') { setWeekType('even'); await bot.sendMessage(chatId, '✅ Even week set.'); }
-    else if (msg.text === '/week')         { const t = getCurrentWeekType(); await bot.sendMessage(chatId, t ? `Current week: ${t.toUpperCase()}` : 'Not set.'); }
+    else if (msg.text === '/setweek odd')  { setWeekType('odd',  requireTimezone(userState)); await bot.sendMessage(chatId, '✅ Odd week set.'); }
+    else if (msg.text === '/setweek even') { setWeekType('even', requireTimezone(userState)); await bot.sendMessage(chatId, '✅ Even week set.'); }
+    else if (msg.text === '/week')         { const t = getCurrentWeekType(requireTimezone(userState)); await bot.sendMessage(chatId, t ? `Current week: ${t.toUpperCase()}` : 'Not set.'); }
     return;
   }
 
@@ -290,7 +290,7 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
   const intents = preIntents?.length ? preIntents : await claude.classify(msg.text, db.getHistory(chatId, 10));
   db.logMessage(chatId, msg.text, intents.join(','), msg.message_id);
   if (!msg._retroDate) {
-    const retro = detectRetroDate(msg.text, userState.timezone || 'Asia/Kuala_Lumpur');
+    const retro = detectRetroDate(msg.text, requireTimezone(userState));
     if (retro) msg._retroDate = retro;
   }
   await dispatchIntents(bot, msg, chatId, userState, intents);

@@ -1,6 +1,6 @@
 const claude = require('../claude');
 const db     = require('../db');
-const { getDayOfWeek } = require('../utils/time');
+const { getDayOfWeek, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 
 function formatPreview(data) {
@@ -47,13 +47,13 @@ async function showMealPreview(bot, msg, photos) {
 
   try {
     const caption = msg.caption || msg.text || '';
+    const userState = db.getState(chatId);
     const dayOfWeek = getDayOfWeek();
-    const weekType  = getCurrentWeekType();
+    const weekType  = getCurrentWeekType(requireTimezone(userState));
     let knownFoodsCtx = '';
     try { knownFoodsCtx = db.getKnownFoodsContext(chatId, dayOfWeek, weekType); } catch {}
 
     const { nowContext } = require('../utils/time');
-    const userState = db.getState(chatId);
     const institutionKeywords = userState?.institution_keywords || null;
 
     let captionWithCtx = caption;

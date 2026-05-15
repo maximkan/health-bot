@@ -2,14 +2,14 @@ const claude  = require('../claude');
 const gcal    = require('../gcal');
 const db      = require('../db');
 const cronSvc = require('../cron');
-const { nowContextTz, getActivityTomorrowStr, getDateAt, getOffsetMs, getDateStrTz, getTomorrowStrTz, tsToISO } = require('../utils/time');
+const { nowContextTz, getActivityTomorrowStr, getDateAt, getOffsetMs, getDateStrTz, getTomorrowStrTz, tsToISO, requireTimezone } = require('../utils/time');
 
 async function handlePlan(bot, msg) {
   const chatId = msg.chat.id;
   await bot.sendChatAction(chatId, 'typing');
   try {
     const userState = db.getState(chatId);
-    const tz = userState.timezone || 'Asia/Kuala_Lumpur';
+    const tz = requireTimezone(userState);
     const isSleeping = userState.status === 'sleeping';
     const activityTomorrow = userState.current_day_start
       ? getActivityTomorrowStr(userState.current_day_start, tz)
@@ -153,7 +153,7 @@ async function handlePlanSkip(bot, msg) {
 // activityTomorrowStr: the "tomorrow" relative to the user's activity day (not real calendar)
 async function processBedPlans(chatId, text, activityTomorrowStr) {
   const state = db.getState(chatId);
-  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
   const defaultTomorrow = activityTomorrowStr || getTomorrowStrTz(tz);
   const todayStr = getDateStrTz(tz);
   try {

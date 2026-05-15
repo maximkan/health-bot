@@ -1,6 +1,6 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const config = require('./config');
-const { getOffsetMs } = require('./utils/time');
+const { getOffsetMs, requireTimezone } = require('./utils/time');
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -126,7 +126,6 @@ ACCURACY RULES:
 - Asian side dishes (banchan, vegetable sides): 30–80g, 20–60 kcal each
 - Korean banchan: spinach namul ~30 kcal, bean sprouts ~15 kcal, kimchi 50g ~20 kcal
 - Small Asian rice bowls: ~150–180g cooked rice = 200–240 kcal
-- Malaysian: nasi lemak (full plate) 500–650 kcal, chicken rice 450–550 kcal, roti canai 300 kcal
 - Soups/broths: mostly water, low calorie unless creamy
 - Do NOT double-count items
 
@@ -295,7 +294,7 @@ async function parseLiveExercise(text) {
 // ── Workout comparison ────────────────────────────────────────────────────────
 
 async function generateWorkoutComparison(current, previous, userProfile = {}) {
-  const tz = userProfile?.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(userProfile);
   const prevDate = previous.date || new Date(previous.logged_at + getOffsetMs(tz)).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
   const exampleForStyle = WORKOUT_COMPARISON_EXAMPLES[userProfile.coaching_style] ?? WORKOUT_COMPARISON_EXAMPLES[2];
   const prompt = `Compare these two workouts and give a brief progress comment.

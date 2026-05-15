@@ -1,6 +1,6 @@
 # Health Bot — Prompt Reference
 
-Literal extraction from code as of 2026-05-15. Do not edit by hand. Regenerate when code changes.
+Literal extraction from code as of 2026-05-15 (updated). Do not edit by hand. Regenerate when code changes.
 
 **Data contract:** All per-user stats (weight, height, age, gender, activity level, macro targets, goal weight) are populated during onboarding. There are no code-level defaults. Functions that need these values throw with an explicit error when called for a user with incomplete data — they do not silently substitute placeholder values.
 
@@ -153,7 +153,6 @@ ACCURACY RULES:
 - Asian side dishes (banchan, vegetable sides): 30–80g, 20–60 kcal each
 - Korean banchan: spinach namul ~30 kcal, bean sprouts ~15 kcal, kimchi 50g ~20 kcal
 - Small Asian rice bowls: ~150–180g cooked rice = 200–240 kcal
-- Malaysian: nasi lemak (full plate) 500–650 kcal, chicken rice 450–550 kcal, roti canai 300 kcal
 - Soups/broths: mostly water, low calorie unless creamy
 - Do NOT double-count items
 

@@ -1,14 +1,14 @@
 const claude  = require('../claude');
 const gcal    = require('../gcal');
 const db      = require('../db');
-const { tsToTimeStr, getActivityTomorrowStr, extractTimeMs, getOffsetMs, getDateStrTz, getTomorrowStrTz } = require('../utils/time');
+const { tsToTimeStr, getActivityTomorrowStr, extractTimeMs, getOffsetMs, getDateStrTz, getTomorrowStrTz, requireTimezone } = require('../utils/time');
 const { stripMarkdown } = require('./ask');
 const { scheduleTimedPlanReminders } = require('./plans');
 const { calculateTDEE, sumWorkoutCalories, ageFromBirthday } = require('../utils/tdee');
 
 // ── Data summary builder ──────────────────────────────────────────────────────
 
-function buildDataSummary(totals, targets, sleep, workouts, recovery, caffeine, timedPlans, userReminders, tdeeCtx) {
+function buildDataSummary(totals, targets, sleep, workouts, recovery, caffeine, timedPlans, userReminders, tdeeCtx, tz) {
   const sections = [];
 
   // Macros
@@ -74,8 +74,8 @@ function buildDataSummary(totals, targets, sleep, workouts, recovery, caffeine, 
     if (caffeine.last_time) {
       try {
         const lastMs = new Date(caffeine.last_time).getTime();
-        lastHour = new Date(lastMs + getOffsetMs('Asia/Kuala_Lumpur')).getUTCHours();
-        lastStr = ` (last at ${tsToTimeStr(lastMs, 'Asia/Kuala_Lumpur')})`;
+        lastHour = new Date(lastMs + getOffsetMs(tz)).getUTCHours();
+        lastStr = ` (last at ${tsToTimeStr(lastMs, tz)})`;
       } catch {}
     }
     const flag = caffeine.total_mg > 400 || lastHour >= 17;
@@ -122,13 +122,13 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
 
   const sleepLine = sleepStr ? `${sleepStr} sleep. ` : '';
   await bot.sendMessage(chatId, `☀️ morning. ${sleepLine}quality? (1-5)`);
-  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
   return { sleepH, sleepStr, bedMs: bedMs ?? (wakeMs - getOffsetMs(tz)), prevTotals, newDayStart: wakeMs, hasBed, prevDayStart: state.current_day_start, tz };
 }
 
 async function processQuality(bot, chatId, quality, wakeData) {
   const { sleepH, bedMs, newDayStart, hasBed, prevDayStart, tz: wakeTz } = wakeData;
-  const tz = wakeTz || db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const tz = wakeTz || requireTimezone(db.getState(chatId));
   const offsetMs = getOffsetMs(tz);
 
   // Only log sleep if we actually know the bed time
@@ -189,7 +189,7 @@ async function processQuality(bot, chatId, quality, wakeData) {
 async function handleBedTime(bot, chatId, state) {
   const now      = Date.now();
   const dayStart = state.current_day_start ?? (now - 16 * 3600 * 1000);
-  const tz       = state.timezone || 'Asia/Kuala_Lumpur';
+  const tz = requireTimezone(state);
 
   try {
     const dateStr     = getDateStrTz(tz);
@@ -229,7 +229,7 @@ async function handleBedTime(bot, chatId, state) {
 
     const lastSleepBed = db.getLastSleepLog(chatId);
     const userReminders = (() => { try { return JSON.parse(userProfile.user_reminders || '[]'); } catch { return []; } })();
-    const dataSummary = buildDataSummary(dayData.totals, t, lastSleepBed, dayData.workouts, dayData.recovery, null, [], userReminders, tdeeCtx);
+    const dataSummary = buildDataSummary(dayData.totals, t, lastSleepBed, dayData.workouts, dayData.recovery, null, [], userReminders, tdeeCtx, tz);
     const summaryStyle = userProfile.coaching_style || 2;
     const exampleForStyle = claude.DAY_SUMMARY_EXAMPLES[summaryStyle] || claude.DAY_SUMMARY_EXAMPLES[2];
     const summaryText = stripMarkdown(await claude.generateDaySummary({ dataSummary, exampleForStyle }, userProfile));
@@ -286,9 +286,10 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
 
     const targetsCtx = db.getTargetsText(chatId);
     const stateNow = db.getState(chatId);
+    const tz = requireTimezone(stateNow);
 
     // Today's pending plans
-    const todayStr  = getDateStrTz(stateNow.timezone || 'Asia/Kuala_Lumpur');
+    const todayStr  = getDateStrTz(tz);
     const timedPlans = db.getPendingTimed(chatId, todayStr);
     const tasks      = db.getPendingUntimed(chatId);
 
@@ -331,7 +332,7 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
       dayData.workouts, dayData.recovery,
       { total_mg: caffeineTotal, last_time: lastCaffeine },
       timedPlans.map(p => `${p.plan_text} at ${p.plan_time}`),
-      userReminders, tdeeCtx
+      userReminders, tdeeCtx, tz
     );
 
     const eveningStyle = stateNow.coaching_style || 2;
