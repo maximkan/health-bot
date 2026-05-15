@@ -1,6 +1,8 @@
 # Health Bot — Prompt Reference
 
-Literal extraction from code as of 2026-05-13. Do not edit by hand. Regenerate when code changes.
+Literal extraction from code as of 2026-05-15. Do not edit by hand. Regenerate when code changes.
+
+**Data contract:** All per-user stats (weight, height, age, gender, activity level, macro targets, goal weight) are populated during onboarding. There are no code-level defaults. Functions that need these values throw with an explicit error when called for a user with incomplete data — they do not silently substitute placeholder values.
 
 ---
 
@@ -212,7 +214,7 @@ If the user's message contains any of these keywords (case-insensitive), treat t
 **Model:** Haiku  
 **Purpose:** Parses a workout log into structured JSON with exercises, duration, and calories.
 
-Note: `${weight_kg}` is substituted at call time. Example below uses 80kg.
+Note: `${weight_kg}` is required at call time — `buildWorkoutSystem` throws if called without it. The example body below uses a placeholder `${weight_kg}`; the actual value is the user's current body weight (from `getLastBodyMeasurement` or `targets.weight_kg`).
 
 ---PROMPT_START--- WORKOUT_SYSTEM
 Parse the user's workout. The message may contain multiple logs (food, plans, etc) — extract ONLY the workout/exercise part.
