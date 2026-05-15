@@ -24,6 +24,30 @@ const CANCEL_WORDS  = ['cancel','no','nope','skip','stop','abort','нет','от
 const pendingStates = new Map();
 const mediaGroups   = new Map();
 
+const STATE_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const STATE_MAX_ATTEMPTS    = 2;
+
+const CANCEL_WORDS_RE = /^(cancel|nevermind|never mind|skip this|forget it|stop|\/cancel|отмена|забудь|отменить|неважно)$/i;
+
+function setPendingState(chatId, state) {
+  pendingStates.set(chatId, { ...state, _createdAt: Date.now(), _attempts: 0 });
+}
+
+function isPendingStateExpired(state) {
+  return state?._createdAt && (Date.now() - state._createdAt > STATE_IDLE_TIMEOUT_MS);
+}
+
+function bumpAttempts(chatId) {
+  const s = pendingStates.get(chatId);
+  if (!s) return 0;
+  s._attempts = (s._attempts ?? 0) + 1;
+  return s._attempts;
+}
+
+function isCancelMessage(text) {
+  return typeof text === 'string' && CANCEL_WORDS_RE.test(text.trim());
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const isConfirmation = (t) => { const lc = (t||'').toLowerCase().trim(); return CONFIRM_WORDS.some(w => lc === w || lc.startsWith(w + ' ')); };
@@ -78,7 +102,7 @@ async function handleDeletion(bot, msg, chatId, userState) {
     if (!match) {
       const lines = ["Which entry to delete?\n", ...entries.map((e, i) => `${i+1}. [${e.label}] ${e.title}${e.extra ? ' — ' + e.extra : ''}`)];
       lines.push('\nReply "delete N" to remove.');
-      pendingStates.set(chatId, { type: 'today_list', entries });
+      setPendingState(chatId, { type: 'today_list', entries });
       await bot.sendMessage(chatId, lines.join('\n'));
       return;
     }
@@ -110,7 +134,7 @@ async function maybeTriggerCatchup(bot, chatId, wakeData) {
     dayStartMs = Date.UTC(ry, rm - 1, rd) - offsetMs;
   }
   await bot.sendMessage(chatId, 'anything to catch up from yesterday?');
-  pendingStates.set(chatId, { type: 'catchup_log', retroDate, dayStartMs });
+  setPendingState(chatId, { type: 'catchup_log', retroDate, dayStartMs });
 }
 
 // ── Intent dispatcher ─────────────────────────────────────────────────────────
@@ -137,7 +161,7 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     }
     pendingStates.delete(chatId);
     await day.handleBedTime(bot, chatId, userState);
-    pendingStates.set(chatId, { type: 'bed_plans', pushback_sent: false });
+    setPendingState(chatId, { type: 'bed_plans', pushback_sent: false });
     return;
   }
 
@@ -157,7 +181,7 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
   if (intents.includes('CORRECTION') && !intents.some(i => MEAL_SET.has(i))) {
     const result = await handleCorrection(bot, msg, chatId, userState);
     if (result?.lines) {
-      pendingStates.set(chatId, { type: 'time_correction_select', entries: result.entries, newISO: result.newISO });
+      setPendingState(chatId, { type: 'time_correction_select', entries: result.entries, newISO: result.newISO });
       await bot.sendMessage(chatId, result.lines);
     }
     return;
@@ -170,14 +194,14 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
   for (const intent of nonMeal) {
     switch (intent) {
       case 'WORKOUT_START': {
-        pendingStates.set(chatId, { type: 'live_workout', exercises: [], startTime: Date.now() });
+        setPendingState(chatId, { type: 'live_workout', exercises: [], startTime: Date.now() });
         await bot.sendMessage(chatId, 'got it — send me your exercises one by one as you finish them. say "done" when you\'re finished.');
         return;
       }
       case 'WORKOUT_LOG': {
         const wData = await showWorkoutPreview(bot, msg);
         if (wData) {
-          pendingStates.set(chatId, { type: 'workout_confirm', workoutData: wData, catchupRetro: msg._catchupRetro });
+          setPendingState(chatId, { type: 'workout_confirm', workoutData: wData, catchupRetro: msg._catchupRetro });
           workoutQueued = true;
         }
         break;
@@ -205,13 +229,13 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     if (workoutQueued) {
       // Queue the meal to be shown after workout is confirmed/cancelled
       const cur = pendingStates.get(chatId);
-      pendingStates.set(chatId, { ...cur, queuedMealMsg: msg, queuedMealDayStart: dayStart });
+      setPendingState(chatId, { ...cur, queuedMealMsg: msg, queuedMealDayStart: dayStart });
     } else {
       const data = await showMealPreview(bot, msg, null);
       if (!data) {
-        pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: msg.text, dayStart, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
+        setPendingState(chatId, { type: 'meal_text_clarification', originalText: msg.text, dayStart, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
       } else {
-        pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
+        setPendingState(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
       }
     }
   }
@@ -237,8 +261,8 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
         const isQuestion = capIntents.includes('COACH_QUESTION') && !capIntents.some(i => i === 'MEAL_LOG' || i === 'DRINK_LOG');
         if (isQuestion) { await handlePhotoQuestion(bot, group.firstMsg, group.photos[0]); return; }
         const data = await showMealPreview(bot, group.firstMsg, group.photos);
-        if (data) pendingStates.set(group.chatId, { type: 'meal_confirm', mealData: data, dayStart: group.dayStart });
-        else pendingStates.set(group.chatId, { type: 'meal_photo_clarification', caption: group.firstMsg.caption || '', photo: group.photos[0], dayStart: group.dayStart });
+        if (data) setPendingState(group.chatId, { type: 'meal_confirm', mealData: data, dayStart: group.dayStart });
+        else setPendingState(group.chatId, { type: 'meal_photo_clarification', caption: group.firstMsg.caption || '', photo: group.photos[0], dayStart: group.dayStart });
       }, 1500);
       return;
     }
@@ -254,8 +278,8 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
     }
     const photo = await downloadPhoto(bot, msg);
     const data = await showMealPreview(bot, msg, photo);
-    if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart });
-    else pendingStates.set(chatId, { type: 'meal_photo_clarification', caption: msg.caption || '', photo, dayStart });
+    if (data) setPendingState(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart });
+    else setPendingState(chatId, { type: 'meal_photo_clarification', caption: msg.caption || '', photo, dayStart });
     return;
   }
 
@@ -272,6 +296,11 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
   }
 
   // ── "delete N" for /today list ────────────────────────────────────────────
+  if (pendingStates.get(chatId)?.type === 'today_list' && isCancelMessage(msg.text)) {
+    pendingStates.delete(chatId);
+    await bot.sendMessage(chatId, 'cancelled.');
+    return;
+  }
   const delMatch = msg.text.match(/^delete\s+(\d+)$/i);
   if (delMatch && pendingStates.get(chatId)?.type === 'today_list') {
     const state = pendingStates.get(chatId);
@@ -424,7 +453,14 @@ function startBot() {
     if (pendingStates.has(chatId)) {
       const state = pendingStates.get(chatId);
 
-      if (state.type === 'bed_plans') {
+      if (isPendingStateExpired(state)) {
+        pendingStates.delete(chatId);
+        // fall through to wake detection / normal routing
+      } else if (isCancelMessage(msg.text)) {
+        pendingStates.delete(chatId);
+        await bot.sendMessage(chatId, 'cancelled.');
+        return;
+      } else if (state.type === 'bed_plans') {
         // If Haiku says WAKE, break out of bed_plans and start wake flow
         if (isWake) {
           pendingStates.delete(chatId);
@@ -435,7 +471,7 @@ function startBot() {
           if (earlyIntents.some(i => LOG_INTENTS.includes(i))) {
             pendingStates.delete(chatId);
             await routeMessage(bot, msg, chatId, db.getState(chatId), earlyIntents);
-            pendingStates.set(chatId, { type: 'bed_plans', pushback_sent: true });
+            setPendingState(chatId, { type: 'bed_plans', pushback_sent: true });
             return;
           }
 
@@ -464,7 +500,7 @@ function startBot() {
           const saved = await processBedPlans(chatId, msg.text || '', dbState.bed_plans_tomorrow);
           if (saved) {
             await bot.sendMessage(chatId, `set: ${saved}. anything else?`);
-            pendingStates.set(chatId, { type: 'bed_plans', pushback_sent: true });
+            setPendingState(chatId, { type: 'bed_plans', pushback_sent: true });
           } else {
             await bot.sendMessage(chatId, 'good night.');
           }
@@ -481,7 +517,7 @@ function startBot() {
       const rawWakeOverride = extractTimeMs(msg.text, userState.timezone);
       const wakeOverride = (rawWakeOverride && rawWakeOverride <= Date.now()) ? rawWakeOverride : null;
       const wakeData = await day.handleMorningWake(bot, chatId, userState, wakeOverride);
-      pendingStates.set(chatId, { type: 'morning_quality', wakeData, pendingMsg: msg, pendingIntents: earlyIntents });
+      setPendingState(chatId, { type: 'morning_quality', wakeData, pendingMsg: msg, pendingIntents: earlyIntents });
       return;
     }
 
@@ -499,14 +535,33 @@ function startBot() {
     if (pendingStates.has(chatId)) {
       const state = pendingStates.get(chatId);
 
+      if (isPendingStateExpired(state)) {
+        pendingStates.delete(chatId);
+        // fall through to routeMessage
+      } else if (isCancelMessage(msg.text)) {
+        pendingStates.delete(chatId);
+        await bot.sendMessage(chatId, 'cancelled.');
+        return;
+      } else {
+
       if (state.type === 'morning_quality') {
         const quality = parseQuality(msg.text || '');
-        if (!quality) { await bot.sendMessage(chatId, 'quality? (1-5)'); return; }
+        if (!quality) {
+          const attempts = bumpAttempts(chatId);
+          if (attempts >= STATE_MAX_ATTEMPTS) {
+            pendingStates.delete(chatId);
+            await bot.sendMessage(chatId, 'skipping sleep quality. you can log it later.');
+            await routeMessage(bot, msg, chatId, db.getState(chatId), earlyIntents);
+            return;
+          }
+          await bot.sendMessage(chatId, "quality? (1-5, or 'cancel' to skip)");
+          return;
+        }
         pendingStates.delete(chatId);
         if (!state.wakeData.hasBed) {
           // No bed time recorded — ask before logging sleep
           await bot.sendMessage(chatId, 'what time did you fall asleep?');
-          pendingStates.set(chatId, { type: 'morning_bed_time', quality, wakeData: state.wakeData, pendingMsg: state.pendingMsg, pendingIntents: state.pendingIntents });
+          setPendingState(chatId, { type: 'morning_bed_time', quality, wakeData: state.wakeData, pendingMsg: state.pendingMsg, pendingIntents: state.pendingIntents });
           return;
         }
         await day.processQuality(bot, chatId, quality, state.wakeData);
@@ -563,7 +618,7 @@ function startBot() {
         const reply = (msg.text || '').toLowerCase();
         if (reply.includes('log') || reply.includes('meal') || reply.includes('yes')) {
           const data = await showMealPreview(bot, state.originalMsg, state.photos);
-          if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart });
+          if (data) setPendingState(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart });
         } else {
           await handlePhotoQuestion(bot, state.originalMsg, state.photos[0]);
         }
@@ -592,7 +647,7 @@ function startBot() {
           workoutData.calories_burned = computeWorkoutCalories(chatId, workoutData);
           const preview = formatWorkoutPreview(workoutData);
           await bot.sendMessage(chatId, preview);
-          pendingStates.set(chatId, { type: 'workout_confirm', workoutData });
+          setPendingState(chatId, { type: 'workout_confirm', workoutData });
           return;
         }
 
@@ -627,15 +682,15 @@ function startBot() {
             const retroDate = state.queuedMealMsg._retroDate;
             const data = await showMealPreview(bot, state.queuedMealMsg, null);
             if (!data) {
-              pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: state.queuedMealMsg.text, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
+              setPendingState(chatId, { type: 'meal_text_clarification', originalText: state.queuedMealMsg.text, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
             } else {
-              pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
+              setPendingState(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
             }
             return;
           }
           if (log && state.catchupRetro) {
             await bot.sendMessage(chatId, 'anything else? (or done)');
-            pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+            setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro });
           }
         };
 
@@ -652,7 +707,7 @@ function startBot() {
             const updated = await claude.applyWorkoutCorrection(state.workoutData, text);
             updated.calories_burned = computeWorkoutCalories(chatId, updated);
             await bot.sendMessage(chatId, formatWorkoutPreview(updated));
-            pendingStates.set(chatId, { ...state, type: 'workout_confirm', workoutData: updated });
+            setPendingState(chatId, { ...state, type: 'workout_confirm', workoutData: updated });
           } catch {
             await bot.sendMessage(chatId, '❌ Could not apply correction.');
           }
@@ -668,7 +723,7 @@ function startBot() {
         const LOG_INTENTS_Q = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','WEIGHT_LOG','PLAN']);
         if (earlyIntents.some(i => LOG_INTENTS_Q.has(i))) {
           if (!state.queuedMealMsg && earlyIntents.some(i => MEAL_SET.has(i))) {
-            pendingStates.set(chatId, { ...state, queuedMealMsg: msg, queuedMealDayStart: userState.current_day_start });
+            setPendingState(chatId, { ...state, queuedMealMsg: msg, queuedMealDayStart: userState.current_day_start });
           }
           await bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData));
           return;
@@ -690,8 +745,8 @@ function startBot() {
         pendingStates.delete(chatId);
         const fakeMsg = { ...msg, caption: `${state.caption}. ${msg.text || ''}`, text: undefined };
         const data = await showMealPreview(bot, fakeMsg, state.photo);
-        if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart });
-        else pendingStates.set(chatId, { type: 'meal_photo_clarification', caption: fakeMsg.caption, photo: state.photo, dayStart: state.dayStart });
+        if (data) setPendingState(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart });
+        else setPendingState(chatId, { type: 'meal_photo_clarification', caption: fakeMsg.caption, photo: state.photo, dayStart: state.dayStart });
         return;
       }
 
@@ -700,8 +755,8 @@ function startBot() {
         const combinedText = `${state.originalText}. ${msg.text || ''}`;
         const fakeMsg = { ...msg, text: combinedText, caption: undefined };
         const data = await showMealPreview(bot, fakeMsg, null);
-        if (data) pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
-        else pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: combinedText, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+        if (data) setPendingState(chatId, { type: 'meal_confirm', mealData: data, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+        else setPendingState(chatId, { type: 'meal_text_clarification', originalText: combinedText, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
         return;
       }
 
@@ -715,7 +770,7 @@ function startBot() {
           await bot.sendMessage(chatId, '❌ Cancelled. Nothing logged.');
           if (state.catchupRetro) {
             await bot.sendMessage(chatId, 'anything else? (or done)');
-            pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+            setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro });
           }
           return;
         }
@@ -728,7 +783,7 @@ function startBot() {
         if (isShortConfirm || (isConfirmation(text) && !isCorrectionIntent)) {
           if (state.needsClarification) {
             // Show the preview so user sees what's being logged, then await final confirm
-            pendingStates.set(chatId, { ...state, needsClarification: false });
+            setPendingState(chatId, { ...state, needsClarification: false });
             await bot.sendMessage(chatId, formatPreview(mealData));
             return;
           }
@@ -736,7 +791,7 @@ function startBot() {
           await logMeal(bot, chatId, mealData, state.dayStart);
           if (state.catchupRetro) {
             await bot.sendMessage(chatId, 'anything else? (or done)');
-            pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+            setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro });
           }
           return;
         }
@@ -747,7 +802,7 @@ function startBot() {
           const updated = await applyCorrection(bot, chatId, mealData, text);
           if (!updated) return;
           await bot.sendMessage(chatId, formatPreview(updated));
-          pendingStates.set(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+          setPendingState(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
           return;
         }
 
@@ -762,7 +817,7 @@ function startBot() {
           const updated = await applyCorrection(bot, chatId, mealData, text);
           if (!updated) return;
           await bot.sendMessage(chatId, formatPreview(updated));
-          pendingStates.set(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+          setPendingState(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
         }
         return;
       }
@@ -780,11 +835,11 @@ function startBot() {
         // If routeMessage set a meal_confirm state, inject catchupRetro into it
         const curState = pendingStates.get(chatId);
         if (curState?.type === 'meal_confirm' || curState?.type === 'meal_text_clarification') {
-          pendingStates.set(chatId, { ...curState, catchupRetro });
+          setPendingState(chatId, { ...curState, catchupRetro });
         } else if (!pendingStates.has(chatId)) {
           // Immediate log (workout/recovery/sleep), ask for more
           await bot.sendMessage(chatId, 'anything else? (or done)');
-          pendingStates.set(chatId, { type: 'catchup_log', ...catchupRetro });
+          setPendingState(chatId, { type: 'catchup_log', ...catchupRetro });
         }
         return;
       }
@@ -802,6 +857,8 @@ function startBot() {
       }
 
       // today_list: fall through
+      } // end cancel/timeout else
+
     }
 
     await routeMessage(bot, msg, chatId, userState, earlyIntents);
@@ -956,7 +1013,7 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     db.saveCoachMessage(chatId, 'assistant', review, sent.message_id);
     // If review suggested target changes, flag so next reply can apply them
     if (/want me to update|apply.*target|update.*target/i.test(review)) {
-      pendingStates.set(chatId, { type: 'weekly_target_suggest' });
+      setPendingState(chatId, { type: 'weekly_target_suggest' });
     }
 
     // Weekly strength summary (fire-and-forget)
@@ -982,7 +1039,7 @@ async function handleToday(bot, chatId, dayStart) {
   if (!entries.length) { await bot.sendMessage(chatId, 'Nothing logged today yet.'); return; }
   const lines = ["Today's logs:\n", ...entries.map((e, i) => `${i+1}. [${e.label}] ${e.title}${e.extra ? ` — ${e.extra}` : ''}`)];
   lines.push('\nReply "delete N" to remove an entry.');
-  pendingStates.set(chatId, { type: 'today_list', entries });
+  setPendingState(chatId, { type: 'today_list', entries });
   await bot.sendMessage(chatId, lines.join('\n'));
 }
 

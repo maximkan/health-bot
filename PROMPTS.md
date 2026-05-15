@@ -1,6 +1,6 @@
 # Health Bot — Prompt Reference
 
-Literal extraction from code as of 2026-05-15 (updated 4). Do not edit by hand. Regenerate when code changes.
+Literal extraction from code as of 2026-05-16 (updated 5). Do not edit by hand. Regenerate when code changes.
 
 **Data contract:** All per-user stats (weight, height, age, gender, activity level, macro targets, goal weight) are populated during onboarding. There are no code-level defaults. Functions that need these values throw with an explicit error when called for a user with incomplete data — they do not silently substitute placeholder values.
 

@@ -5,7 +5,6 @@ process.chdir('/root/health-bot');
 
 const claude = require('./src/claude');
 const db     = require('./src/db');
-const db = require('./src/db');
 const { handleAsk, closeChain } = require('./src/handlers/ask');
 
 const CHAT_ID = 119445404;
