@@ -1,8 +1,12 @@
 const { Client } = require('@notionhq/client');
 const config = require('./config');
-const { getMalaysiaISO, getMalaysiaDateStr, getDayOfWeek, getTodayRange, tsToISO, buildTimeISO, buildDateTimeISO } = require('./utils/time');
+const { getDayOfWeek, getTodayRange, tsToISO, buildTimeISO, buildDateTimeISO, nowISOTz, getDateStrTz } = require('./utils/time');
 
 const notion = new Client({ auth: config.notion.token });
+
+// Only Max gets Notion writes during multi-user testing
+const NOTION_CHAT_ID = 119445404;
+const notionEnabled = (chatId) => chatId === NOTION_CHAT_ID;
 
 // ── Notion write queue (max 3 req/sec) ────────────────────────────────────────
 const _queue = [];
@@ -92,12 +96,12 @@ function dayRangeFilter(dayStartMs) {
 // ── Meal Log ──────────────────────────────────────────────────────────────────
 
 async function createMealEntry(chatId, data) {
-  const db = require('./db');
-  if (!db.getState(chatId)?.notion_enabled) return null;
+  if (!notionEnabled(chatId)) return null;
   const { meal_name, meal_type, items = [], totals, notes = '', time, caffeine_mg = 0 } = data;
+  const tz = require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur';
   const dateISO = data.date
-    ? buildDateTimeISO(data.date, time || null)
-    : (time ? buildTimeISO(time) : getMalaysiaISO());
+    ? buildDateTimeISO(data.date, time || null, tz)
+    : (time ? buildTimeISO(time, tz) : nowISOTz(tz));
   const itemsSummary = items.map(i => i.weight_g ? `${i.name} ${i.weight_g}g` : i.name).join(', ');
 
   const children = [
@@ -135,9 +139,9 @@ async function createMealEntry(chatId, data) {
 // ── Workout Log ───────────────────────────────────────────────────────────────
 
 async function createWorkoutEntry(chatId, data) {
-  const db = require('./db');
-  if (!db.getState(chatId)?.notion_enabled) return null;
+  if (!notionEnabled(chatId)) return null;
   const { workout_name, activity_type, duration_min, calories_burned, exercises = [], exercises_summary = '', notes = '' } = data;
+  const tz = require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur';
   const children = [
     callout(`${workout_name}  ·  ${duration_min} min  ·  ~${calories_burned} kcal burned`, '💪', 'orange_background'),
     h2('Exercises'),
@@ -153,7 +157,7 @@ async function createWorkoutEntry(chatId, data) {
     parent: { database_id: config.notion.db.workoutLog },
     properties: {
       Workout:          { title: rt(workout_name) },
-      Date:             { date: { start: data.date ? buildDateTimeISO(data.date, data.time || null) : (data.time ? buildTimeISO(data.time) : getMalaysiaISO()) } },
+      Date:             { date: { start: data.date ? buildDateTimeISO(data.date, data.time || null, tz) : (data.time ? buildTimeISO(data.time, tz) : nowISOTz(tz)) } },
       'Activity Type':  { rich_text: rt(activity_type) },
       'Duration (min)': { number: duration_min },
       'Calories Burned':{ number: calories_burned },
@@ -187,9 +191,9 @@ async function updateWorkoutEntry(pageId, data) {
 // ── Recovery Log ──────────────────────────────────────────────────────────────
 
 async function createRecoveryEntry(chatId, data) {
-  const db = require('./db');
-  if (!db.getState(chatId)?.notion_enabled) return null;
+  if (!notionEnabled(chatId)) return null;
   const { type, duration_min, temperature_c, notes = '' } = data;
+  const tz = require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur';
   const sessionName = `${type} ${duration_min} min`;
   const tempStr = temperature_c != null ? `  ·  ${temperature_c}°C` : '';
   const children = [
@@ -198,7 +202,7 @@ async function createRecoveryEntry(chatId, data) {
   ];
   const props = {
     Session:          { title: rt(sessionName) },
-    Date:             { date: { start: data.date ? buildDateTimeISO(data.date, data.time || null) : (data.time ? buildTimeISO(data.time) : getMalaysiaISO()) } },
+    Date:             { date: { start: data.date ? buildDateTimeISO(data.date, data.time || null, tz) : (data.time ? buildTimeISO(data.time, tz) : nowISOTz(tz)) } },
     Type:             { select: { name: type } },
     'Duration (min)': { number: duration_min },
     Notes:            { rich_text: rt(notes) },
@@ -210,14 +214,12 @@ async function createRecoveryEntry(chatId, data) {
 // ── Sleep Log ─────────────────────────────────────────────────────────────────
 
 async function createSleepEntry(chatId, data) {
-  const db = require('./db');
-  const notionEnabled = db.getState(chatId)?.notion_enabled;
+  if (!notionEnabled(chatId)) return null;
   const { bed_time, wake_time, hours_slept, quality, notes = '', bed_date, type = 'Night' } = data;
   const isNap = type === 'Nap';
-  const dateLabel = bed_date || getMalaysiaDateStr();
+  const tz = require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const dateLabel = bed_date || getDateStrTz(tz);
   const title = isNap ? `Nap ${dateLabel} ${bed_time}` : `Night of ${dateLabel}`;
-
-  if (!notionEnabled) return null;
 
   // For night sleep: check if entry already exists today and update instead of creating
   if (!isNap) {
@@ -269,9 +271,12 @@ async function createSleepEntry(chatId, data) {
 
 // ── Body Measurements ─────────────────────────────────────────────────────────
 
-async function createBodyEntry(data) {
+async function createBodyEntry(chatId, data) {
+  if (!notionEnabled(chatId)) return null;
   const { weight_kg, body_fat_pct, weight_change, notes = '' } = data;
-  const bmi = +(weight_kg / (1.76 * 1.76)).toFixed(1);
+  const tz = require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const heightCm = require('./db').getTargetsFromDb(chatId).height_cm ?? 176;
+  const bmi = +(weight_kg / ((heightCm / 100) ** 2)).toFixed(1);
   const changeStr = weight_change !== null && weight_change !== undefined
     ? (weight_change >= 0 ? `+${weight_change}` : `${weight_change}`) + ' kg'
     : '';
@@ -283,8 +288,8 @@ async function createBodyEntry(data) {
     ...(notes ? [divider, para(notes)] : []),
   ];
   const props = {
-    'Check-in':    { title: rt(`Body Check — ${getMalaysiaDateStr()}`) },
-    Date:          { date: { start: getMalaysiaISO() } },
+    'Check-in':    { title: rt(`Body Check — ${getDateStrTz(tz)}`) },
+    Date:          { date: { start: nowISOTz(tz) } },
     'Weight (kg)': { number: weight_kg },
     BMI:           { number: bmi },
     Notes:         { rich_text: rt(notes) },
@@ -296,10 +301,12 @@ async function createBodyEntry(data) {
 
 // ── Plans & Reminders ─────────────────────────────────────────────────────────
 
-async function createPlanEntry(plan) {
+async function createPlanEntry(chatId, plan) {
+  if (!notionEnabled(chatId)) return null;
   const { title, date, time, recurring = 'One-time', notes = '' } = plan;
   if (!config.notion.db.plans) return null;
-  const dateISO = time ? buildDateTimeISO(date, time) : `${date}T09:00:00+08:00`;
+  const tz = require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const dateISO = time ? buildDateTimeISO(date, time, tz) : buildDateTimeISO(date, '09:00', tz);
   return enqueue(() => notion.pages.create({
     parent: { database_id: config.notion.db.plans },
     properties: {
@@ -313,14 +320,15 @@ async function createPlanEntry(plan) {
   }));
 }
 
-async function getPlansForDate(dateStr) {
+async function getPlansForDate(dateStr, tz = 'Asia/Kuala_Lumpur') {
   if (!config.notion.db.plans) return [];
+  const { buildDateTimeISO: bdt } = require('./utils/time');
   const res = await notion.databases.query({
     database_id: config.notion.db.plans,
     filter: {
       and: [
-        { property: 'Date', date: { on_or_after: `${dateStr}T00:00:00+08:00` } },
-        { property: 'Date', date: { before:       `${dateStr}T23:59:59+08:00` } },
+        { property: 'Date', date: { on_or_after: bdt(dateStr, '00:00', tz) } },
+        { property: 'Date', date: { before:       bdt(dateStr, '23:59', tz) } },
         { property: 'Status', select: { equals: 'Pending' } },
       ],
     },
@@ -332,8 +340,8 @@ async function getPlansForDate(dateStr) {
   })).filter(p => p.title);
 }
 
-async function updatePlanStatusNotion(pageId, status) {
-  if (!pageId) return;
+async function updatePlanStatusNotion(chatId, pageId, status) {
+  if (!notionEnabled(chatId) || !pageId) return;
   return enqueue(() => notion.pages.update({
     page_id: pageId,
     properties: { Status: { select: { name: status } } },
@@ -342,10 +350,11 @@ async function updatePlanStatusNotion(pageId, status) {
 
 // ── Golf Log ──────────────────────────────────────────────────────────────────
 
-async function createGolfEntry(data) {
+async function createGolfEntry(chatId, data) {
   if (!config.notion.db.golfLog) return null;
   const { session_type = 'Course Round', location, score, holes, focus_areas, what_went_well, what_to_improve, coach_feedback, notes = '' } = data;
-  const title = `${session_type} — ${getMalaysiaDateStr()}`;
+  const tz = chatId ? (require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur') : 'Asia/Kuala_Lumpur';
+  const title = `${session_type} — ${getDateStrTz(tz)}`;
   const children = [
     callout(title, '⛳', 'green_background'),
     ...(what_went_well ? [h2('What Went Well'), para(what_went_well)] : []),
@@ -355,7 +364,7 @@ async function createGolfEntry(data) {
   ];
   const props = {
     Session:     { title: rt(title) },
-    Date:        { date: { start: getMalaysiaISO() } },
+    Date:        { date: { start: nowISOTz(tz) } },
     Type:        { select: { name: session_type } },
     Notes:       { rich_text: rt(notes) },
   };
@@ -500,16 +509,47 @@ function getKnownFoodsContext(chatId, dayOfWeek, weekType) {
   return sections.join('\n\n');
 }
 
+function shouldSkipKnownFood(name) {
+  if (!name) return true;
+  if (name.includes('[Dinner') || name.includes('[Lunch') || name.includes('[NS Cafe]')) return true;
+  if (name.toLowerCase().includes('daily summary') || name.toLowerCase().includes('day summary')) return true;
+  if (/–\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s*\d/i.test(name)) return true;
+  return false;
+}
+
 async function addKnownFood(chatId, data) {
-  const name = data.meal_name;
-  if (!name) return;
-  if (name.includes('[Dinner') || name.includes('[Lunch') || name.includes('[NS Cafe]')) return;
   const db = require('./db');
+  // If multi-item meal, save each item separately
+  const items = data.items;
+  if (items && items.length > 1) {
+    for (const item of items) {
+      if (shouldSkipKnownFood(item.name)) continue;
+      if (db.knownFoodExists(chatId, item.name)) continue;
+      db.upsertKnownFood(chatId, { name: item.name, serving: item.weight_g ? `${item.weight_g}g` : '1 serving', calories: item.calories ?? 0, protein: item.protein ?? 0, carbs: item.carbs ?? 0, fat: item.fat ?? 0, notes: 'Auto-saved', source: 'User Logged' });
+      if (notionEnabled(chatId) && config.notion.db.knownFoods) {
+        enqueue(() => notion.pages.create({
+          parent: { database_id: config.notion.db.knownFoods },
+          properties: {
+            'Food Name':    { title: rt(item.name) },
+            'Source':       { select: { name: 'User Logged' } },
+            'Serving Size': { rich_text: rt(item.weight_g ? `${item.weight_g}g` : '1 serving') },
+            'Calories':     { number: Math.round(item.calories ?? 0) },
+            'Protein (g)':  { number: Math.round(item.protein ?? 0) },
+            'Carbs (g)':    { number: Math.round(item.carbs ?? 0) },
+            'Fat (g)':      { number: Math.round(item.fat ?? 0) },
+            'Notes':        { rich_text: rt('Auto-saved') },
+          },
+        })).catch(() => {});
+      }
+    }
+    return;
+  }
+  // Single-item meal — save by meal_name as before
+  const name = data.meal_name;
+  if (shouldSkipKnownFood(name)) return;
   if (db.knownFoodExists(chatId, name)) return;
-  // SQLite first
   db.upsertKnownFood(chatId, { name, serving: '1 serving', calories: data.totals?.calories ?? 0, protein: data.totals?.protein ?? 0, carbs: data.totals?.carbs ?? 0, fat: data.totals?.fat ?? 0, notes: 'Auto-saved', source: 'User Logged' });
-  // Mirror to Notion only if user has Notion enabled
-  if (db.getState(chatId)?.notion_enabled && config.notion.db.knownFoods) {
+  if (notionEnabled(chatId) && config.notion.db.knownFoods) {
     enqueue(() => notion.pages.create({
       parent: { database_id: config.notion.db.knownFoods },
       properties: {
@@ -528,8 +568,8 @@ async function addKnownFood(chatId, data) {
 
 // ── Coach Notes ───────────────────────────────────────────────────────────────
 
-async function createDailySummaryPage(dayData, summaryText, dateStr, targets) {
-  if (!config.notion.db.coachNotes) return;
+async function createDailySummaryPage(chatId, dayData, summaryText, dateStr, targets) {
+  if (!notionEnabled(chatId) || !config.notion.db.coachNotes) return;
   const T = targets || { calories: 1600, protein: 220, carbs: 80, fat: 53 };
   const { totals, meals, workouts, recovery } = dayData;
 
@@ -552,7 +592,7 @@ async function createDailySummaryPage(dayData, summaryText, dateStr, targets) {
     parent: { database_id: config.notion.db.coachNotes },
     properties: {
       Summary: { title: rt(`Daily Summary — ${dateStr}`) },
-      Date:    { date: { start: getMalaysiaISO() } },
+      Date:    { date: { start: nowISOTz(require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur') } },
       Type:    { select: { name: 'Daily Night Summary' } },
       Content: { rich_text: rt(summaryText.slice(0, 2000)) },
       'Calories Eaten':  { number: totals.calories },
@@ -563,13 +603,14 @@ async function createDailySummaryPage(dayData, summaryText, dateStr, targets) {
   }));
 }
 
-async function createCoachNote(title, bodyText, type = 'Daily Evening Check') {
-  if (!config.notion.db.coachNotes) return;
+async function createCoachNote(chatId, title, bodyText, type = 'Daily Evening Check') {
+  if (!notionEnabled(chatId) || !config.notion.db.coachNotes) return;
+  const tz = require('./db').getState(chatId).timezone || 'Asia/Kuala_Lumpur';
   return enqueue(() => notion.pages.create({
     parent: { database_id: config.notion.db.coachNotes },
     properties: {
       Summary: { title: rt(title) },
-      Date:    { date: { start: getMalaysiaISO() } },
+      Date:    { date: { start: nowISOTz(tz) } },
       Type:    { select: { name: type } },
       Content: { rich_text: rt(bodyText.slice(0, 2000)) },
     },
@@ -698,7 +739,7 @@ module.exports = {
   createPlanEntry, updatePlanStatusNotion, getPlansForDate,
   createGolfEntry, getGolfHistory, getGolfHubContent,
   getDailyMealTotals, getDrinkEntries, getEntriesForDay, getDayData, getTodayEntries,
-  deleteEntry, getLastBodyMeasurement, getKnownFoodsContext, addKnownFood,
+  deleteEntry, getKnownFoodsContext, addKnownFood,
   createDailySummaryPage, createCoachNote, correctEntryTime,
   getWeekData, getAllBodyMeasurements, getHistoricalData,
 };

@@ -3,30 +3,31 @@ const notion  = require('../notion');
 const gcal    = require('../gcal');
 const db      = require('../db');
 const cronSvc = require('../cron');
-const { nowContext, getTodayStr, getTomorrowStr, getActivityTomorrowStr, getDateAt } = require('../utils/time');
+const { nowContextTz, getActivityTomorrowStr, getDateAt, getOffsetMs, getDateStrTz, getTomorrowStrTz, tsToISO } = require('../utils/time');
 
 async function handlePlan(bot, msg) {
   const chatId = msg.chat.id;
   await bot.sendChatAction(chatId, 'typing');
   try {
     const userState = db.getState(chatId);
+    const tz = userState.timezone || 'Asia/Kuala_Lumpur';
     const isSleeping = userState.status === 'sleeping';
     const activityTomorrow = userState.current_day_start
-      ? getActivityTomorrowStr(userState.current_day_start)
-      : getTomorrowStr();
+      ? getActivityTomorrowStr(userState.current_day_start, tz)
+      : getTomorrowStrTz(tz);
     const fallbackDate = isSleeping
-      ? (userState.bed_plans_tomorrow || getTomorrowStr())
+      ? (userState.bed_plans_tomorrow || getTomorrowStrTz(tz))
       : activityTomorrow;
 
+    const todayStr   = getDateStrTz(tz);
+    const calTomorrow = getTomorrowStrTz(tz);
     const activityDate = userState.current_day_start
-      ? require('../utils/time').tsToISO(userState.current_day_start).split('T')[0]
-      : getTodayStr();
-    const activityCtx = (!isSleeping && activityTomorrow !== getTomorrowStr())
+      ? tsToISO(userState.current_day_start, tz).split('T')[0]
+      : todayStr;
+    const activityCtx = (!isSleeping && activityTomorrow !== calTomorrow)
       ? `\nIMPORTANT: The user's activity day is ${activityDate} (they woke up then and have not slept yet). For scheduling: today = ${activityDate}, tomorrow = ${activityTomorrow}.`
       : '';
-    console.log(`[plan] isSleeping=${isSleeping} activityDate=${activityDate} activityTomorrow=${activityTomorrow} calTomorrow=${getTomorrowStr()} fallback=${fallbackDate}`);
-    const plans = await claude.parsePlans(msg.text || '', nowContext() + activityCtx);
-    console.log(`[plan] parsed:`, JSON.stringify(plans.map(p => ({title:p.title,date:p.date,time:p.time}))));
+    const plans = await claude.parsePlans(msg.text || '', nowContextTz(userState.timezone) + activityCtx);
     if (!plans.length) {
       await handleAskFallback(bot, msg);
       return;
@@ -34,8 +35,7 @@ async function handlePlan(bot, msg) {
 
     const confirmations = [];
     for (const plan of plans) {
-      const calTomorrow = getTomorrowStr();
-      const planDate = (!plan.date || (isSleeping && plan.date === getTodayStr()))
+      const planDate = (!plan.date || (isSleeping && plan.date === todayStr))
         ? fallbackDate
         : (!isSleeping && plan.date === calTomorrow && activityTomorrow !== calTomorrow)
           ? activityTomorrow  // remap calendar-tomorrow → activity-tomorrow when past midnight
@@ -53,7 +53,7 @@ async function handlePlan(bot, msg) {
 
       // Write to Notion
       try {
-        const notionPage = await notion.createPlanEntry(planWithDate);
+        const notionPage = await notion.createPlanEntry(chatId, planWithDate);
         if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
       } catch (err) {
         console.error('Plan Notion write error:', err.message);
@@ -68,7 +68,7 @@ async function handlePlan(bot, msg) {
       if (plan.time && planDate) {
         let calStatus = '';
         try {
-          const gcalEvent = await gcal.createEvent({ title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
+          const gcalEvent = await gcal.createEvent(chatId, { title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
           db.setPlanCalendar(planId);
           if (gcalEvent?.id) db.setPlanGCalId(planId, gcalEvent.id);
           calStatus = ' 📅 Added to Google Calendar.';
@@ -93,14 +93,15 @@ async function handlePlan(bot, msg) {
 }
 
 function scheduleTimedPlanReminders(chatId, planId, plan) {
-  const { getDateAt } = require('../utils/time');
+  const offsetMs = getOffsetMs(db.getState(chatId).timezone);
   const [h, m] = (plan.time || '00:00').split(':').map(Number);
   if (isNaN(h) || isNaN(m)) return;
-  const eventMs = getDateAt(plan.date, h, m);
+  const eventMs = getDateAt(plan.date, h, m, offsetMs);
 
   function persist(fireMs, text, fn) {
     if (fireMs <= Date.now()) return;
-    const remId = db.saveReminder(chatId, fireMs, text);
+    if (db.getReminderByTime(chatId, fireMs)) return; // dedup: skip if already scheduled
+    const remId = db.saveReminder(chatId, fireMs, text, planId);
     cronSvc.scheduleOnce(chatId, fireMs, async () => {
       db.markReminderFired(remId);
       await fn();
@@ -109,14 +110,14 @@ function scheduleTimedPlanReminders(chatId, planId, plan) {
 
   // 30 min before
   persist(eventMs - 30 * 60 * 1000, `${plan.title} in 30 min`, () =>
-    cronSvc.getBotRef()?.sendMessage(chatId, `${plan.title} in 30 min`).catch(() => {})
+    cronSvc.getBotRef()?.sendMessage(chatId, `${plan.title} in 30 min — time to head out`).catch(() => {})
   );
 
   // Night before at 9 PM
   const [yr, mo, dy] = plan.date.split('-').map(Number);
   const prevDayStr = new Date(Date.UTC(yr, mo - 1, dy - 1)).toISOString().split('T')[0];
   persist(getDateAt(prevDayStr, 21, 0), `tomorrow: ${plan.title} at ${plan.time}`, () =>
-    cronSvc.getBotRef()?.sendMessage(chatId, `tomorrow: ${plan.title} at ${plan.time}`).catch(() => {})
+    cronSvc.getBotRef()?.sendMessage(chatId, `heads up — ${plan.title} tomorrow at ${plan.time}`).catch(() => {})
   );
 }
 
@@ -128,7 +129,7 @@ async function handlePlanDone(bot, msg) {
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans to mark done.'); return; }
     const plan = await claude.matchPlanToModify(msg.text, pending);
     db.updatePlanStatus(plan.id, 'done');
-    if (plan.notion_page_id) await notion.updatePlanStatusNotion(plan.notion_page_id, 'Done').catch(() => {});
+    if (plan.notion_page_id) await notion.updatePlanStatusNotion(chatId, plan.notion_page_id, 'Done').catch(() => {});
     await bot.sendMessage(chatId, `✅ Done: ${plan.plan_text}. Off your list.`);
   } catch (err) {
     console.error('Plan done error:', err.message);
@@ -144,13 +145,13 @@ async function handlePlanSkip(bot, msg) {
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans.'); return; }
     const plan = await claude.matchPlanToModify(msg.text, pending);
     db.updatePlanStatus(plan.id, 'skipped');
-    if (plan.notion_page_id) await notion.updatePlanStatusNotion(plan.notion_page_id, 'Cancelled').catch(() => {});
+    if (plan.notion_page_id) await notion.updatePlanStatusNotion(chatId, plan.notion_page_id, 'Cancelled').catch(() => {});
     if (plan.gcal_event_id) {
-      await gcal.deleteEvent(plan.gcal_event_id).catch(() => {});
+      await gcal.deleteEvent(chatId, plan.gcal_event_id).catch(() => {});
     } else if (plan.calendar_event_created && plan.plan_date && plan.plan_time) {
-      const events = await gcal.getEventsForDate(plan.plan_date).catch(() => []);
+      const events = await gcal.getEventsForDate(chatId, plan.plan_date).catch(() => []);
       const match = events.find(e => e.title?.toLowerCase() === plan.plan_text?.toLowerCase() && e.time === plan.plan_time);
-      if (match?.id) await gcal.deleteEvent(match.id).catch(() => {});
+      if (match?.id) await gcal.deleteEvent(chatId, match.id).catch(() => {});
     }
     await bot.sendMessage(chatId, `Cancelled: ${plan.plan_text}.`);
   } catch (err) {
@@ -162,14 +163,23 @@ async function handlePlanSkip(bot, msg) {
 // Process plans given at bedtime (can return a confirmation string)
 // activityTomorrowStr: the "tomorrow" relative to the user's activity day (not real calendar)
 async function processBedPlans(chatId, text, activityTomorrowStr) {
-  const defaultTomorrow = activityTomorrowStr || getTomorrowStr(); // activityTomorrowStr is real calendar tomorrow set at bed time
-  const todayStr = getTodayStr();
+  const state = db.getState(chatId);
+  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const defaultTomorrow = activityTomorrowStr || getTomorrowStrTz(tz);
+  const todayStr = getDateStrTz(tz);
   try {
     // Tell Haiku explicitly what "tomorrow" means in this context
-    const ctx = `${nowContext()}\nContext: user is setting plans for tomorrow. Tomorrow = ${defaultTomorrow}. Default all unspecified dates to ${defaultTomorrow}.`;
-    const plans = await claude.parsePlans(text, ctx);
-    console.log(`[bedPlans] parsed:`, JSON.stringify(plans.map(p => ({ title: p.title, date: p.date, time: p.time }))));
-    if (!plans.length) return null;
+    const ctx = `${nowContextTz(state.timezone)}\nContext: user is setting plans for tomorrow. Tomorrow = ${defaultTomorrow}. Default all unspecified dates to ${defaultTomorrow}.`;
+    let plans = await claude.parsePlans(text, ctx);
+
+    if (!plans.length) {
+      // Haiku failed to parse — check if user actually means "no plans" vs named something
+      const noPlans = await claude.isNoPlanResponse(text).catch(() => true);
+      if (noPlans) return null;
+      // Has content but Haiku missed it — save raw text as a task
+      plans = [{ title: text.trim(), date: defaultTomorrow, time: null, recurring: 'one-time', guests: [], location: null, is_task: true }];
+      console.log(`[bedPlans] fallback: saving raw text as task: "${text.trim()}"`);
+    }
 
     const lines = [];
     for (const plan of plans) {
@@ -180,14 +190,14 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
       const planWithDate = { ...plan, date: planDate };
 
       try {
-        const notionPage = await notion.createPlanEntry(planWithDate);
+        const notionPage = await notion.createPlanEntry(chatId, planWithDate);
         if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
       } catch {}
 
       if (plan.time) {
         scheduleTimedPlanReminders(chatId, planId, planWithDate);
         try {
-          const gcalEvent = await gcal.createEvent({ title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
+          const gcalEvent = await gcal.createEvent(chatId, { title: plan.title, date: planDate, time: plan.time, duration_min: plan.duration_min, location: plan.location, guests: plan.guests || [] });
           db.setPlanCalendar(planId);
           if (gcalEvent?.id) db.setPlanGCalId(planId, gcalEvent.id);
         } catch (err) { console.error('Bed plans GCal error:', err.message); }
@@ -196,7 +206,7 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
         lines.push(plan.title);
       }
     }
-    return lines.join(', ');
+    return lines.map(l => `- ${l}`).join('\n');
   } catch (err) {
     console.error('Bed plans parse error:', err.message);
     return null;
@@ -204,7 +214,8 @@ async function processBedPlans(chatId, text, activityTomorrowStr) {
 }
 
 async function syncNotionPlansToDb(chatId, dateStr) {
-  const notionPlans = await notion.getPlansForDate(dateStr).catch(() => []);
+  const tz = db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const notionPlans = await notion.getPlansForDate(dateStr, tz).catch(() => []);
   for (const np of notionPlans) {
     if (np.notion_page_id && db.getPlanByNotionId(np.notion_page_id)) continue;
     if (db.getPlanByTitleDate(chatId, np.title, dateStr)) continue;
@@ -213,7 +224,7 @@ async function syncNotionPlansToDb(chatId, dateStr) {
     if (np.time) {
       scheduleTimedPlanReminders(chatId, planId, { title: np.title, date: dateStr, time: np.time });
       try {
-        const ev = await gcal.createEvent({ title: np.title, date: dateStr, time: np.time, guests: [] });
+        const ev = await gcal.createEvent(chatId, { title: np.title, date: dateStr, time: np.time, guests: [] });
         db.setPlanCalendar(planId);
         if (ev?.id) db.setPlanGCalId(planId, ev.id);
       } catch (err) { console.error('Notion→GCal sync error:', err.message); }

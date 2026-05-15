@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const db   = require('./db');
-const { getMalaysiaHour, getMalaysiaDateStr, nowContext, getTodayStr, getTomorrowStr } = require('./utils/time');
+const { getOffsetMs, getDateAt, getDateStrTz } = require('./utils/time');
 
 let _bot = null;
 const _onceTimers = new Map(); // key → timeout
@@ -9,64 +9,114 @@ const getBotRef = () => _bot;
 
 function init(bot) {
   _bot = bot;
-  const tz = { timezone: 'Asia/Kuala_Lumpur' };
 
-  cron.schedule('30 19 * * *', runEveningCheck,        tz); // 7:30 PM
-  cron.schedule('30 0  * * *', () => runBedNudge(1),   tz); // 12:30 AM
-  cron.schedule('0  2  * * *', () => runBedNudge(2),   tz); // 2:00 AM
-  // Weekly review triggered on Monday morning wake instead of fixed 8am cron
-  cron.schedule('0  8  * * *', scheduleProactiveForDay, tz); // reschedule daily at 8am
-  cron.schedule('0  */2 * * *', runUntimedReminders,   tz); // every 2 hrs
-  cron.schedule('*/30 * * * *', runGCalSync,            tz); // every 30 min
+  // Per-user daily crons — each fires in the user's own timezone
+  for (const chatId of db.getAllChatIds()) {
+    scheduleUserDailyCrons(chatId);
+    scheduleProactiveForDay(chatId); // schedule today's proactive windows on startup
+  }
 
-  scheduleProactiveForDay();
+  // Global crons (timezone-independent)
+  cron.schedule('*/30 * * * *', runGCalSync);
+
+  // Schedule untimed reminders for already-awake users (e.g. after server restart)
+  for (const chatId of db.getAllChatIds()) {
+    const s = db.getState(chatId);
+    if (s.status === 'awake' && s.current_day_start) {
+      scheduleUntimedRemindersForUser(chatId, s.current_day_start);
+    }
+  }
+
+  scheduleAllBedNudges();
   rescheduleAll();
   console.log('✅ Cron jobs scheduled');
 }
 
+function scheduleUserDailyCrons(chatId) {
+  const state = db.getState(chatId);
+  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const opts = { timezone: tz };
+  // Evening check at 19:30 in user's local time
+  cron.schedule('30 19 * * *', () => runEveningCheckForUser(chatId), opts);
+  // Morning setup at 8:00 in user's local time
+  cron.schedule('0 8 * * *', () => {
+    scheduleProactiveForDay(chatId);
+    scheduleBedNudgesForDay(chatId);
+  }, opts);
+}
+
 // ── Randomised proactive checks ───────────────────────────────────────────────
 
-function scheduleProactiveForDay() {
-  const { getDateAt, getMalaysiaDateStr } = require('./utils/time');
-  const todayStr = getMalaysiaDateStr();
+function scheduleProactiveForDay(chatId) {
+  const state = db.getState(chatId);
+  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const offsetMs = getOffsetMs(tz);
+  const todayStr = getDateStrTz(tz);
   const windows = [[10, 13], [14, 17], [19, 21]];
   for (const [start, end] of windows) {
     const h = start + Math.floor(Math.random() * (end - start));
     const m = Math.floor(Math.random() * 60);
-    const fireMs = getDateAt(todayStr, h, m);
+    const fireMs = getDateAt(todayStr, h, m, offsetMs);
     const delay = fireMs - Date.now();
     if (delay > 0) {
       const label = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-      setTimeout(() => runProactive(label), delay);
-      console.log(`Proactive check scheduled at ${label}`);
+      setTimeout(() => runProactiveForUser(chatId, label), delay);
+      console.log(`Proactive check for ${chatId} scheduled at ${label} (${tz})`);
     }
   }
 }
 
 // ── Evening check ─────────────────────────────────────────────────────────────
 
-async function runEveningCheck() {
+async function runEveningCheckForUser(chatId) {
   const day = require('./handlers/day');
-  for (const chatId of db.getAllChatIds()) {
-    const state = db.getState(chatId);
-    if (state.status !== 'awake') continue;
-    try { await day.sendEveningCheck(_bot, chatId, state.current_day_start); }
-    catch (e) { console.error('Evening check error:', e.message); }
-  }
+  const state = db.getState(chatId);
+  if (state.status !== 'awake') return;
+  try { await day.sendEveningCheck(_bot, chatId, state.current_day_start); }
+  catch (e) { console.error('Evening check error:', e.message); }
 }
 
-// ── Bed nudges ────────────────────────────────────────────────────────────────
+// ── Bed nudges — per user, based on bed_time_pref ────────────────────────────
 
-async function runBedNudge(nudgeNum) {
+function scheduleBedNudgesForDay(chatId) {
+  const state = db.getState(chatId);
+  if (state.status !== 'awake') return;
+
+  const tz       = state.timezone || 'Asia/Kuala_Lumpur';
+  const offsetMs = getOffsetMs(tz);
+
+  let bedH = 0, bedM = 30; // default 00:30 user-local time
+  if (state.bed_time_pref) {
+    const parts = state.bed_time_pref.split(':').map(Number);
+    if (!isNaN(parts[0])) { bedH = parts[0]; bedM = parts[1] ?? 0; }
+  }
+
+  const todayStr    = getDateStrTz(tz);
+  const tomorrowStr = new Date(Date.now() + offsetMs + 86400000).toISOString().split('T')[0];
+  let nudge1Ms = getDateAt(todayStr, bedH, bedM, offsetMs);
+  // If already past (or within 5 min), schedule for tomorrow
+  if (nudge1Ms <= Date.now() + 5 * 60 * 1000) {
+    nudge1Ms = getDateAt(tomorrowStr, bedH, bedM, offsetMs);
+  }
+  const nudge2Ms = nudge1Ms + 90 * 60 * 1000;
+
+  scheduleOnce(chatId, nudge1Ms, async () => {
+    const s = db.getState(chatId);
+    if (s.status !== 'awake') return;
+    await _bot?.sendMessage(chatId, 'heading to bed soon?').catch(() => {});
+    db.setState(chatId, { bed_nudge_sent: 1 });
+  });
+
+  scheduleOnce(chatId, nudge2Ms, async () => {
+    const s = db.getState(chatId);
+    if (s.status !== 'awake' || !s.bed_nudge_sent) return;
+    await _bot?.sendMessage(chatId, 'still up? you should sleep.').catch(() => {});
+  });
+}
+
+function scheduleAllBedNudges() {
   for (const chatId of db.getAllChatIds()) {
-    const state = db.getState(chatId);
-    if (state.status !== 'awake') continue;
-    if (nudgeNum === 2 && !state.bed_nudge_sent) continue; // only send 2nd if 1st was sent
-    const msg = nudgeNum === 1 ? 'heading to bed soon?' : 'still up? you should sleep.';
-    try {
-      await _bot.sendMessage(chatId, msg);
-      if (nudgeNum === 1) db.setState(chatId, { bed_nudge_sent: 1 });
-    } catch (e) { console.error('Bed nudge error:', e.message); }
+    scheduleBedNudgesForDay(chatId);
   }
 }
 
@@ -88,82 +138,115 @@ async function runWeeklyReview() {
 
 // ── Proactive pattern detection ───────────────────────────────────────────────
 
-async function runProactive(timeLabel) {
-  const claude = require('./claude');
-  const notion = require('./notion');
-  const todayStr = getMalaysiaDateStr();
-
-  for (const chatId of db.getAllChatIds()) {
-    const state = db.getState(chatId);
-    if (state.status !== 'awake') continue;
-    if (db.wasRecentlyActive(chatId, 15)) continue; // skip if user was active in last 15 min
-
-    try {
-      const dayStart = state.current_day_start;
-      const dayData  = await notion.getDayData(chatId, dayStart).catch(() => null);
-      if (!dayData) continue;
-
-      const hoursAwake = dayStart ? (Date.now() - dayStart) / 3600000 : 0;
-      const noMeals  = dayData.meals.length === 0 && hoursAwake >= 4;
-      const lastLog  = noMeals ? null : 'recent';
-
-      const targetsCtx = notion.getTargetsText(chatId);
-      const targets = notion.getTargets(chatId);
-
-      // Fetch last 7 days for weekly pattern detection
-      const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
-      const recentWeek = weekData?.dailyTotals ?? null;
-
-      // Include recent bot messages so Claude knows what it already flagged
-      const recentAlerts = db.getHistory(chatId, 30)
-        .filter(m => m.role === 'assistant')
-        .slice(-6)
-        .map(m => m.text.slice(0, 200));
-
-      const todayAlert = (state.last_proactive_date === todayStr && state.last_proactive_msg)
-        ? state.last_proactive_msg : null;
-
-      const recentData = {
-        time: timeLabel,
-        today: { ...dayData.totals, meals: dayData.meals.map(m => m.name) },
-        targets,
-        noMealsYet: noMeals,
-        caffeine_mg: state.caffeine_today_mg ?? 0,
-        last_caffeine_time: state.last_caffeine_time,
-        hasWorkout: dayData.workouts.length > 0,
-        recentWeek,
-        recentAlerts,
-        todayAlert,
-      };
-
-      const rawAlert = await claude.checkProactivePatterns(recentData, targetsCtx, state);
-      const alert = rawAlert ? require('./handlers/ask').stripMarkdown(rawAlert) : null;
-      if (alert) {
-        const sent = await _bot.sendMessage(chatId, alert);
-        db.saveCoachMessage(chatId, 'assistant', alert, sent.message_id);
-        db.setState(chatId, { last_proactive_date: todayStr, last_proactive_msg: alert.slice(0, 200) });
-      }
-    } catch (e) { console.error('Proactive check error:', e.message); }
-  }
+function alertCategory(text) {
+  if (!text) return null;
+  const lc = text.toLowerCase();
+  if (/protein/.test(lc)) return 'protein';
+  if (/caffeine|coffee/.test(lc)) return 'caffeine';
+  if (/calorie|calori|\bkcal\b/.test(lc)) return 'calories';
+  if (/workout|gym|train|exercise/.test(lc)) return 'workout';
+  if (/meal|eating|food|logged|log/.test(lc)) return 'meals';
+  if (/sleep/.test(lc)) return 'sleep';
+  return 'other';
 }
 
-// ── Untimed task reminders (every 2 hours) ────────────────────────────────────
+function isSameAlertCategory(a, b) {
+  const ca = alertCategory(a);
+  const cb = alertCategory(b);
+  return ca !== null && ca === cb;
+}
 
-async function runUntimedReminders() {
-  for (const chatId of db.getAllChatIds()) {
-    const state = db.getState(chatId);
-    if (state.status !== 'awake') continue;
+async function runProactiveForUser(chatId, timeLabel) {
+  const claude = require('./claude');
+  const notion = require('./notion');
+  const state = db.getState(chatId);
+  if (state.status !== 'awake') return;
+  if (db.wasRecentlyActive(chatId, 15)) return;
 
-    const tasks = db.getPendingUntimed(chatId);
-    if (!tasks.length) continue;
+  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  const todayStr = getDateStrTz(tz);
 
-    try {
-      const msg = tasks.length === 1
-        ? `reminder: ${tasks[0].plan_text}`
-        : `don't forget today: ${tasks.map(t => t.plan_text).join(', ')}`;
-      await _bot.sendMessage(chatId, msg);
-      for (const task of tasks) db.markPlanReminded(task.id);
-    } catch (e) { console.error('Untimed reminder error:', e.message); }
+  try {
+    const dayStart = state.current_day_start;
+    const dayData = db.getDayDataFromSQLite(chatId, dayStart);
+
+    const minutesAwake = dayStart ? Math.floor((Date.now() - dayStart) / 60000) : 0;
+    const noMeals = dayData.meals.length === 0 && minutesAwake >= 240;
+
+    const targetsCtx = notion.getTargetsText(chatId);
+    const targets = notion.getTargets(chatId);
+
+    const todayParts = todayStr.split('-').map(Number);
+    const todayUTC = new Date(Date.UTC(todayParts[0], todayParts[1] - 1, todayParts[2]));
+    const dow = todayUTC.getUTCDay();
+    const mondayUTC = new Date(todayUTC);
+    mondayUTC.setUTCDate(todayUTC.getUTCDate() - (dow === 0 ? 6 : dow - 1));
+    const mondayStr = mondayUTC.toISOString().split('T')[0];
+    const weekStartMs = getDateAt(mondayStr, 0, 0, getOffsetMs(tz));
+    const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
+    const recentWeek = weekData?.dailyTotals ?? null;
+
+    const recentAlerts = db.getHistory(chatId, 30)
+      .filter(m => m.role === 'assistant')
+      .slice(-6)
+      .map(m => m.text.slice(0, 200));
+
+    const todayAlert = (state.last_proactive_date === todayStr && state.last_proactive_msg)
+      ? state.last_proactive_msg : null;
+
+    const lastSleep = db.getLastSleepLog(chatId);
+    // Before 4h awake, hide empty meals so Claude can't infer "nothing logged yet"
+    const mealsForData = (minutesAwake < 240 && dayData.meals.length === 0)
+      ? undefined
+      : dayData.meals.map(m => m.name);
+    const recentData = {
+      minutesAwake,
+      today: { ...dayData.totals, meals: mealsForData, recovery: dayData.recovery },
+      targets,
+      noMealsYet: noMeals,
+      caffeine_mg: state.caffeine_today_mg ?? 0,
+      last_caffeine_time: state.last_caffeine_time,
+      hasWorkout: dayData.workouts.length > 0,
+      last_sleep: lastSleep ? { hours: lastSleep.hours_slept, quality: lastSleep.quality } : null,
+      recentWeek,
+      recentAlerts,
+      todayAlert,
+    };
+
+    const rawAlert = await claude.checkProactivePatterns(recentData, targetsCtx, state);
+    const alert = rawAlert ? require('./handlers/ask').stripMarkdown(rawAlert) : null;
+    if (alert) {
+      // Server-side same-category block — Claude's reasoning cannot override this
+      if (todayAlert && isSameAlertCategory(todayAlert, alert)) return;
+      const sent = await _bot.sendMessage(chatId, alert);
+      db.saveCoachMessage(chatId, 'assistant', alert, sent.message_id);
+      db.setState(chatId, { last_proactive_date: todayStr, last_proactive_msg: alert.slice(0, 200) });
+    }
+  } catch (e) { console.error('Proactive check error:', e.message); }
+}
+
+// ── Untimed task reminders (per-user, wake + 2h intervals) ───────────────────
+
+async function runUntimedReminderForUser(chatId) {
+  const state = db.getState(chatId);
+  if (state.status !== 'awake') return;
+  const tasks = db.getPendingUntimed(chatId);
+  if (!tasks.length) return;
+  try {
+    const msg = tasks.length === 1
+      ? `reminder: ${tasks[0].plan_text}`
+      : `don't forget: ${tasks.map(t => t.plan_text).join(', ')}`;
+    await _bot.sendMessage(chatId, msg);
+    // Intentionally NOT marking reminded — untimed tasks stay pending until user says done
+  } catch (e) { console.error('Untimed reminder error:', e.message); }
+}
+
+function scheduleUntimedRemindersForUser(chatId, wakeMs) {
+  // Fire at wakeMs+2h, +4h, +6h, +8h, +10h — skip slots already in the past
+  for (let i = 1; i <= 5; i++) {
+    const fireMs = wakeMs + i * 2 * 3600 * 1000;
+    if (fireMs <= Date.now()) continue;
+    scheduleOnce(chatId, fireMs, () => runUntimedReminderForUser(chatId));
   }
 }
 
@@ -173,23 +256,25 @@ async function runGCalSync() {
   const gcal   = require('./gcal');
   const notion = require('./notion');
   const { scheduleTimedPlanReminders } = require('./handlers/plans');
-  const { getDateAt } = require('./utils/time');
-  const todayStr    = getMalaysiaDateStr();
-  const tomorrowStr = getTomorrowStr();
-  const dayAfterStr = (() => {
-    const [y, m, d] = tomorrowStr.split('-').map(Number);
-    return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().split('T')[0];
-  })();
-  const datesToSync = [todayStr, tomorrowStr, dayAfterStr];
 
   for (const chatId of db.getAllChatIds()) {
     const state = db.getState(chatId);
+    const tz = state.timezone || 'Asia/Kuala_Lumpur';
+    const { getDateStrTz, getTomorrowStrTz } = require('./utils/time');
+    const todayStr    = getDateStrTz(tz);
+    const tomorrowStr = getTomorrowStrTz(tz);
+    const dayAfterStr = (() => {
+      const [y, m, d] = tomorrowStr.split('-').map(Number);
+      return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().split('T')[0];
+    })();
+    const datesToSync = [todayStr, tomorrowStr, dayAfterStr];
 
     // GCal → DB: import GCal events missing from DB (today + next 2 days)
     for (const dateStr of datesToSync) {
       try {
         const events = await gcal.getEventsForDate(chatId, dateStr).catch(() => []);
         const existing = new Set(db.getPendingTimed(chatId, dateStr).map(p => p.plan_text.toLowerCase()));
+        const userOffsetMs = getOffsetMs(db.getState(chatId).timezone);
         for (const event of events) {
           if (!event.time || event.allDay) continue;
           if (existing.has(event.title.toLowerCase())) continue;
@@ -197,7 +282,7 @@ async function runGCalSync() {
           const planId = db.savePlan(chatId, { text: event.title, date: dateStr, time: event.time });
           db.setPlanGCalId(planId, event.id);
           const [h, m] = event.time.split(':').map(Number);
-          const eventMs = getDateAt(dateStr, h, m);
+          const eventMs = getDateAt(dateStr, h, m, userOffsetMs);
           const minsUntil = (eventMs - Date.now()) / 60000;
           const reminderMs = eventMs - 30 * 60 * 1000;
 
@@ -208,7 +293,7 @@ async function runGCalSync() {
           }
 
           try {
-            const notionPage = await notion.createPlanEntry({ title: event.title, date: dateStr, time: event.time });
+            const notionPage = await notion.createPlanEntry(chatId, { title: event.title, date: dateStr, time: event.time });
             if (notionPage?.id) db.setPlanNotionId(planId, notionPage.id);
           } catch (err) { console.error('GCal→Notion sync error:', err.message); }
 
@@ -254,6 +339,18 @@ function scheduleOnce(chatId, atMs, fn) {
   _onceTimers.set(key, handle);
 }
 
+function cancelOnce(chatId, atMs) {
+  const key = `${chatId}_${atMs}`;
+  const handle = _onceTimers.get(key);
+  if (handle) { clearTimeout(handle); _onceTimers.delete(key); }
+}
+
+function cancelAllForChat(chatId) {
+  for (const [key, handle] of _onceTimers.entries()) {
+    if (key.startsWith(`${chatId}_`)) { clearTimeout(handle); _onceTimers.delete(key); }
+  }
+}
+
 function rescheduleAll() {
   db.cleanOldReminders();
 
@@ -270,26 +367,24 @@ function rescheduleAll() {
   // Schedule plans that have no reminder in DB yet (avoid duplicates)
   const scheduledKeys = new Set(pending.map(r => `${r.chat_id}_${r.fire_ms}`));
   const { scheduleTimedPlanReminders } = require('./handlers/plans');
-  const { getDateAt } = require('./utils/time');
   for (const chatId of db.getAllChatIds()) {
-    const today = getMalaysiaDateStr();
+    const userOffsetMs = getOffsetMs(db.getState(chatId).timezone);
+    const today = new Date(Date.now() + userOffsetMs).toISOString().split('T')[0];
     const timedPlans = db.getPendingTimed(chatId, today);
     for (const plan of timedPlans) {
       const [h, m] = (plan.plan_time || '00:00').split(':').map(Number);
       if (isNaN(h) || isNaN(m)) continue;
-      const eventMs = getDateAt(plan.plan_date, h, m);
+      const eventMs = getDateAt(plan.plan_date, h, m, userOffsetMs);
       const reminderMs = eventMs - 30 * 60 * 1000;
       const minsUntil = (eventMs - Date.now()) / 60000;
 
       if (reminderMs > Date.now() && !scheduledKeys.has(`${chatId}_${reminderMs}`)) {
-        // No existing reminder in DB — create one
         scheduleTimedPlanReminders(chatId, plan.id, { title: plan.plan_text, date: plan.plan_date, time: plan.plan_time });
       } else if (minsUntil > 0 && minsUntil <= 60 && !scheduledKeys.has(`${chatId}_${reminderMs}`)) {
-        // Reminder window passed but event still upcoming and no DB entry — fire immediately
         _bot?.sendMessage(chatId, `heads up: ${plan.plan_text} at ${plan.plan_time} (in ${Math.round(minsUntil)} min)`).catch(() => {});
       }
     }
   }
 }
 
-module.exports = { init, scheduleOnce, rescheduleAll, getBotRef };
+module.exports = { init, scheduleOnce, cancelOnce, cancelAllForChat, rescheduleAll, getBotRef, scheduleBedNudgesForDay, scheduleUserDailyCrons, scheduleUntimedRemindersForUser };

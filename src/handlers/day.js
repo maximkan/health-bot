@@ -2,10 +2,99 @@ const claude  = require('../claude');
 const notion  = require('../notion');
 const gcal    = require('../gcal');
 const db      = require('../db');
-const { getMalaysiaDateStr, tsToTimeStr, nowContext, getTomorrowStr, getTodayStr, getActivityTomorrowStr, extractTimeMs } = require('../utils/time');
+const { tsToTimeStr, getActivityTomorrowStr, extractTimeMs, getOffsetMs, getDateStrTz, getTomorrowStrTz } = require('../utils/time');
 const { stripMarkdown } = require('./ask');
 const { scheduleTimedPlanReminders, syncNotionPlansToDb } = require('./plans');
-const { calculateTDEE, sumWorkoutCalories } = require('../utils/tdee');
+const { calculateTDEE, sumWorkoutCalories, ageFromBirthday } = require('../utils/tdee');
+
+// ── Data summary builder ──────────────────────────────────────────────────────
+
+function buildDataSummary(totals, targets, sleep, workouts, recovery, caffeine, timedPlans, userReminders, tdeeCtx) {
+  const sections = [];
+
+  // Macros
+  const cal  = Math.round(totals?.calories ?? 0);
+  const pro  = Math.round(totals?.protein  ?? 0);
+  const carb = Math.round(totals?.carbs    ?? 0);
+  const fat  = Math.round(totals?.fat      ?? 0);
+  const tCal = targets.calories;
+  const tPro = targets.protein;
+  const tCarb = targets.carbs;
+  const tFat  = targets.fat;
+
+  const macroLines = [
+    `- calories: ${cal} / ${tCal} → ${cal > tCal ? `OVER by ${cal - tCal} (flag)` : 'under target'}`,
+    `- protein: ${pro} / ${tPro} → ${pro < tPro ? `UNDER by ${tPro - pro} (flag)` : 'at or over target'}`,
+    `- carbs: ${carb} / ${tCarb} → ${carb > tCarb ? `OVER by ${carb - tCarb} (flag)` : 'under target'}`,
+    `- fat: ${fat} / ${tFat} → ${fat > tFat ? `OVER by ${fat - tFat} (flag)` : 'under target'}`,
+  ];
+  sections.push('Macros today:\n' + macroLines.join('\n'));
+
+  // Sleep
+  if (sleep && sleep.hours_slept != null) {
+    sections.push(`Sleep last night: ${fmtHours(sleep.hours_slept)} at quality ${sleep.quality}/5`);
+  } else {
+    sections.push('Sleep last night: not logged');
+  }
+
+  // Workouts
+  if (workouts && workouts.length) {
+    const wLines = workouts.map(w => {
+      const parts = [w.duration_min ? `${w.duration_min}min` : null, w.calories_burned ? `${w.calories_burned} kcal burned` : null].filter(Boolean).join(', ');
+      return `- ${w.workout_name}${parts ? ', ' + parts : ''}`;
+    });
+    sections.push('Workouts today:\n' + wLines.join('\n'));
+  } else {
+    sections.push('Workouts today: none');
+  }
+
+  // Recovery (omit if empty)
+  if (recovery && recovery.length) {
+    sections.push('Recovery: ' + claude.formatRecoveryRows(recovery).join(', '));
+  }
+
+  // Energy balance (omit if null)
+  if (tdeeCtx) {
+    const { tdee, targetIntake, workoutKcal, eaten, netIntake, tdeeDeficit, targetDeficit, weight_kg, goal_weight } = tdeeCtx;
+    const balLines = [
+      `- TDEE (maintenance): ${tdee} kcal`,
+      `- Target intake: ${targetIntake} kcal (planned deficit ${targetDeficit} kcal)`,
+      `- Eaten today: ${eaten} kcal`,
+      `- Workout burned: ${workoutKcal} kcal`,
+      `- Net intake: ${netIntake} kcal`,
+      `- Actual deficit vs maintenance: ${tdeeDeficit} kcal`,
+    ];
+    if (weight_kg) balLines.push(`- Current weight: ${weight_kg}kg → goal: ${goal_weight}kg`);
+    sections.push('Energy balance:\n' + balLines.join('\n'));
+  }
+
+  // Caffeine (omit if absent/zero)
+  if (caffeine && caffeine.total_mg) {
+    let lastHour = -1;
+    let lastStr = '';
+    if (caffeine.last_time) {
+      try {
+        const lastMs = new Date(caffeine.last_time).getTime();
+        lastHour = new Date(lastMs + getOffsetMs('Asia/Kuala_Lumpur')).getUTCHours();
+        lastStr = ` (last at ${tsToTimeStr(lastMs, 'Asia/Kuala_Lumpur')})`;
+      } catch {}
+    }
+    const flag = caffeine.total_mg > 400 || lastHour >= 17;
+    sections.push(`Caffeine: ${caffeine.total_mg}mg today${lastStr}${flag ? ' [flag]' : ''}`);
+  }
+
+  // Upcoming plans (omit if empty)
+  if (timedPlans && timedPlans.length) {
+    sections.push('Upcoming plans:\n' + timedPlans.map(p => `- ${p}`).join('\n'));
+  }
+
+  // User reminders (omit if empty)
+  if (userReminders && userReminders.length) {
+    sections.push('User reminders:\n' + userReminders.map(r => `- ${r}`).join('\n'));
+  }
+
+  return sections.join('\n\n');
+}
 
 // ── Morning wake flow ─────────────────────────────────────────────────────────
 
@@ -26,7 +115,7 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
 
   let prevTotals = null;
   if (state.current_day_start) {
-    prevTotals = await notion.getDailyMealTotals(chatId, state.current_day_start).catch(() => null);
+    prevTotals = db.getDailyMealTotalsFromSQLite(chatId, state.current_day_start);
   }
 
   db.setState(chatId, { status: 'awake', current_day_start: wakeMs, bed_time: null });
@@ -34,23 +123,24 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
 
   const sleepLine = sleepStr ? `${sleepStr} sleep. ` : '';
   await bot.sendMessage(chatId, `☀️ morning. ${sleepLine}quality? (1-5)`);
-  return { sleepH, sleepStr, bedMs: bedMs ?? (wakeMs - 8 * 3600 * 1000), prevTotals, newDayStart: wakeMs, hasBed, prevDayStart: state.current_day_start };
+  const tz = state.timezone || 'Asia/Kuala_Lumpur';
+  return { sleepH, sleepStr, bedMs: bedMs ?? (wakeMs - getOffsetMs(tz)), prevTotals, newDayStart: wakeMs, hasBed, prevDayStart: state.current_day_start, tz };
 }
 
 async function processQuality(bot, chatId, quality, wakeData) {
-  const { sleepH, bedMs, newDayStart, hasBed, prevDayStart } = wakeData;
+  const { sleepH, bedMs, newDayStart, hasBed, prevDayStart, tz: wakeTz } = wakeData;
+  const tz = wakeTz || db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const offsetMs = getOffsetMs(tz);
 
   // Only log sleep if we actually know the bed time
   if (hasBed && sleepH != null) {
     try {
-      const OFFSET_MS = 8 * 60 * 60 * 1000;
-      // Use activity day start date as the label ("Night of April 24" not the calendar bed date)
       const activityDayStart = prevDayStart || bedMs;
-      const bedDateStr = new Date(activityDayStart + OFFSET_MS).toISOString().split('T')[0];
+      const bedDateStr = new Date(activityDayStart + offsetMs).toISOString().split('T')[0];
       db.saveSleepLog(chatId, { bed_time: bedMs, wake_time: newDayStart, hours_slept: sleepH, quality, notes: '' });
       await notion.createSleepEntry(chatId, {
-        bed_time:    tsToTimeStr(bedMs),
-        wake_time:   tsToTimeStr(newDayStart),
+        bed_time:    tsToTimeStr(bedMs, tz),
+        wake_time:   tsToTimeStr(newDayStart, tz),
         hours_slept: sleepH,
         quality,
         notes: '',
@@ -62,7 +152,7 @@ async function processQuality(bot, chatId, quality, wakeData) {
   }
 
   // Sync today's plans from Notion into DB before displaying
-  const todayStr  = getMalaysiaDateStr();
+  const todayStr  = getDateStrTz(tz);
   await syncNotionPlansToDb(chatId, todayStr).catch(() => {});
   const timedToday = db.getPendingTimed(chatId, todayStr);
   const tasks      = db.getPendingUntimed(chatId);
@@ -85,7 +175,7 @@ async function processQuality(bot, chatId, quality, wakeData) {
 
   const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const now = new Date(Date.now() + 8 * 3600 * 1000);
+  const now = new Date(Date.now() + offsetMs);
   const dateHeader = `📅 ${days[now.getUTCDay()]}, ${months[now.getUTCMonth()]} ${now.getUTCDate()}`;
 
   const lines = [];
@@ -102,6 +192,9 @@ async function processQuality(bot, chatId, quality, wakeData) {
     const sleepNote = (hasBed && sleepH != null) ? `${fmtHours(sleepH)} sleep. ` : '';
     await bot.sendMessage(chatId, `${sleepNote}no plans today. free day.`);
   }
+
+  // Schedule tonight's bed nudge based on user's bed_time_pref
+  try { require('../cron').scheduleBedNudgesForDay(chatId); } catch {}
 }
 
 // ── Bed flow ──────────────────────────────────────────────────────────────────
@@ -109,12 +202,14 @@ async function processQuality(bot, chatId, quality, wakeData) {
 async function handleBedTime(bot, chatId, state) {
   const now      = Date.now();
   const dayStart = state.current_day_start ?? (now - 16 * 3600 * 1000);
+  const tz       = state.timezone || 'Asia/Kuala_Lumpur';
 
   try {
-    const dateStr     = getMalaysiaDateStr();
-    const dayData     = await notion.getDayData(chatId, dayStart);
+    const dateStr     = getDateStrTz(tz);
+    const dayData     = db.getDayDataFromSQLite(chatId, dayStart);
     const targetsCtx  = notion.getTargetsText(chatId);
     const targets     = notion.getTargets(chatId);
+    const userProfile = db.getState(chatId);
 
     // TDEE / deficit calculation
     const t = targets;
@@ -122,21 +217,35 @@ async function handleBedTime(bot, chatId, state) {
     try {
       const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
       const weeklyWorkouts = weekData?.trainDays ?? 3;
-      const tdee = calculateTDEE(t.weight_kg ?? 105, t.height_cm ?? 176, t.age ?? 26, weeklyWorkouts);
+      const latestBody = db.getLastBodyMeasurement(chatId);
+      const currentWeight = latestBody?.weight_kg ?? t.weight_kg ?? 105;
+      const age = ageFromBirthday(t.birthday) ?? t.age ?? 26;
+      const tdee = calculateTDEE(currentWeight, t.height_cm ?? 176, age, weeklyWorkouts, userProfile.activity_level ?? 2, userProfile.gender ?? 'male');
       const workoutKcal = sumWorkoutCalories(dayData.workouts);
       const eaten = Math.round(dayData.totals?.calories ?? 0);
-      const netIntake = eaten - workoutKcal; // calories net of exercise
-      const deficit = tdee - eaten;          // how much below TDEE (positive = deficit)
-      const weeklyDeficitNeeded = ((t.weight_kg ?? 105) - (t.goal_weight ?? 80)) > 5 ? 500 : 250;
-      tdeeCtx = { tdee, workoutKcal, eaten, netIntake, deficit, weeklyDeficitNeeded, weight_kg: t.weight_kg, goal_weight: t.goal_weight };
+      const netIntake = eaten - workoutKcal;
+      const tdeeDeficit = tdee - eaten;
+      const targetIntake = t.calories;
+      const targetDeficit = tdee - targetIntake;
+      tdeeCtx = { tdee, targetIntake, workoutKcal, eaten, netIntake, tdeeDeficit, targetDeficit, weight_kg: currentWeight, goal_weight: t.goal_weight };
     } catch {}
 
-    const userProfile = db.getState(chatId);
-    const summaryText = stripMarkdown(await claude.generateDaySummary(dayData, targetsCtx, tdeeCtx, userProfile));
+    const lastSleepBed = db.getLastSleepLog(chatId);
+    const userReminders = (() => { try { return JSON.parse(userProfile.user_reminders || '[]'); } catch { return []; } })();
+    const dataSummary = buildDataSummary(dayData.totals, t, lastSleepBed, dayData.workouts, dayData.recovery, null, [], userReminders, tdeeCtx);
+    const summaryStyle = userProfile.coaching_style || 2;
+    const exampleForStyle = claude.DAY_SUMMARY_EXAMPLES[summaryStyle] || claude.DAY_SUMMARY_EXAMPLES[2];
+    const summaryText = stripMarkdown(await claude.generateDaySummary({ dataSummary, exampleForStyle }, userProfile));
 
-    await notion.createDailySummaryPage(dayData, summaryText, dateStr, targets).catch(err => console.error('Summary page error:', err.message));
+    await notion.createDailySummaryPage(chatId, dayData, summaryText, dateStr, targets).catch(err => console.error('Summary page error:', err.message));
     db.setState(chatId, { status: 'sleeping', bed_time: now });
-    await bot.sendMessage(chatId, summaryText);
+
+    // Mention pending untimed tasks before sleep
+    const pendingTasks = db.getPendingUntimed(chatId);
+    const taskNote = pendingTasks.length
+      ? `\n\nstill pending: ${pendingTasks.map(t => t.plan_text).join(', ')} — carrying over to tomorrow.`
+      : '';
+    await bot.sendMessage(chatId, summaryText + taskNote);
   } catch (err) {
     console.error('Bed time error:', err.message);
     db.setState(chatId, { status: 'sleeping', bed_time: now });
@@ -144,8 +253,8 @@ async function handleBedTime(bot, chatId, state) {
   }
 
   const tomorrow = state.current_day_start
-    ? getActivityTomorrowStr(state.current_day_start)
-    : getTomorrowStr();
+    ? getActivityTomorrowStr(state.current_day_start, tz)
+    : getTomorrowStrTz(tz);
   await syncNotionPlansToDb(chatId, tomorrow).catch(() => {});
   const timedTomorrow = db.getPendingTimed(chatId, tomorrow);
   const gcalTomorrow  = await gcal.getEventsForDate(chatId, tomorrow).catch(() => []);
@@ -176,20 +285,18 @@ async function handleBedTime(bot, chatId, state) {
 
 async function sendEveningCheck(bot, chatId, dayStartMs) {
   try {
-    const targets = notion.getTargets(chatId) ?? { calories: 1600, protein: 220, carbs: 80, fat: 53 };
-    const [dayData, drinkEntries] = await Promise.all([
-      notion.getDayData(chatId, dayStartMs).catch(() => ({ totals: { calories: 0, protein: 0, carbs: 0, fat: 0, caffeine: 0 }, meals: [], workouts: [], recovery: [] })),
-      notion.getDrinkEntries(chatId, dayStartMs).catch(() => []),
-    ]);
+    const targets = notion.getTargets(chatId);
+    const dayData = db.getDayDataFromSQLite(chatId, dayStartMs);
+    const drinkEntries = dayData.meals.filter(m => (m.caffeine ?? 0) > 0 || /drink|coffee|tea|shake|smoothie|juice/i.test(m.type || ''));
 
     const targetsCtx = notion.getTargetsText(chatId);
+    const stateNow = db.getState(chatId);
 
     // Today's pending plans
-    const todayStr  = getMalaysiaDateStr();
+    const todayStr  = getDateStrTz(stateNow.timezone || 'Asia/Kuala_Lumpur');
     const timedPlans = db.getPendingTimed(chatId, todayStr);
     const tasks      = db.getPendingUntimed(chatId);
 
-    const stateNow = db.getState(chatId);
     const caffeineTotal = stateNow.caffeine_today_mg ?? 0;
     const lastCaffeine  = stateNow.last_caffeine_time;
 
@@ -199,24 +306,32 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
       const weekDataEv = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
       const weeklyWorkoutsEv = weekDataEv?.trainDays ?? 3;
       const t2 = targets;
-      const tdee = calculateTDEE(t2.weight_kg ?? 105, t2.height_cm ?? 176, t2.age ?? 26, weeklyWorkoutsEv);
+      const latestBodyEv = db.getLastBodyMeasurement(chatId);
+      const currentWeightEv = latestBodyEv?.weight_kg ?? t2.weight_kg ?? 105;
+      const ageEv = ageFromBirthday(t2.birthday) ?? t2.age ?? 26;
+      const tdee = calculateTDEE(currentWeightEv, t2.height_cm ?? 176, ageEv, weeklyWorkoutsEv, stateNow.activity_level ?? 2, stateNow.gender ?? 'male');
       const workoutKcal = sumWorkoutCalories(dayData.workouts);
       const eaten = Math.round(dayData.totals?.calories ?? 0);
-      const deficit = tdee - eaten;
-      tdeeCtx = { tdee, workoutKcal, eaten, deficit, goal_weight: t2.goal_weight };
+      const netIntake = eaten - workoutKcal;
+      const tdeeDeficit = tdee - eaten;
+      const targetIntake = t2.calories;
+      const targetDeficit = tdee - targetIntake;
+      tdeeCtx = { tdee, targetIntake, workoutKcal, eaten, netIntake, tdeeDeficit, targetDeficit, goal_weight: t2.goal_weight };
     } catch {}
 
-    const checkData = {
-      totals:   dayData.totals,
-      targets,
-      caffeine: { total_mg: caffeineTotal, last_time: lastCaffeine, drinks: drinkEntries.length },
-      workouts: dayData.workouts,
-      timedPlans: timedPlans.map(p => `${p.plan_text} at ${p.plan_time}`),
-      tasks: tasks.map(p => p.plan_text),
-      tdee: tdeeCtx,
-    };
+    const lastSleep = db.getLastSleepLog(chatId);
+    const userReminders = (() => { try { return JSON.parse(stateNow.user_reminders || '[]'); } catch { return []; } })();
+    const dataSummary = buildDataSummary(
+      dayData.totals, targets, lastSleep,
+      dayData.workouts, dayData.recovery,
+      { total_mg: caffeineTotal, last_time: lastCaffeine },
+      timedPlans.map(p => `${p.plan_text} at ${p.plan_time}`),
+      userReminders, tdeeCtx
+    );
 
-    const msg = stripMarkdown(await claude.generateEveningCheck(checkData, targetsCtx, stateNow));
+    const eveningStyle = stateNow.coaching_style || 2;
+    const eveningExample = claude.EVENING_CHECK_EXAMPLES[eveningStyle] || claude.EVENING_CHECK_EXAMPLES[2];
+    const msg = stripMarkdown(await claude.generateEveningCheck({ dataSummary, exampleForStyle: eveningExample }, stateNow));
     const sent = await bot.sendMessage(chatId, msg);
 
     db.setState(chatId, {
@@ -225,7 +340,7 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
     });
     db.saveCoachMessage(chatId, 'assistant', msg, sent.message_id);
 
-    await notion.createCoachNote(`Evening Check — ${todayStr}`, msg, 'Daily Evening Check').catch(() => {});
+    await notion.createCoachNote(chatId, `Evening Check — ${todayStr}`, msg, 'Daily Evening Check').catch(() => {});
   } catch (err) {
     console.error('Evening check error:', err.message);
   }

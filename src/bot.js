@@ -8,6 +8,7 @@ const day     = require('./handlers/day');
 const { showMealPreview, logMeal, applyCorrection, formatPreview } = require('./handlers/meal');
 const { showWorkoutPreview, logWorkout, formatWorkoutPreview, computeWorkoutCalories, formatExerciseLine } = require('./handlers/workout');
 const { handleRecovery }    = require('./handlers/recovery');
+const { closeChain }        = require('./handlers/ask');
 const { handleSleep }       = require('./handlers/sleep');
 const { handleBody }        = require('./handlers/body');
 const { handleAsk, handleCoachReply, handlePhotoQuestion } = require('./handlers/ask');
@@ -15,10 +16,11 @@ const { handlePlan, handlePlanDone, handlePlanSkip, processBedPlans } = require(
 const { handleOnboarding } = require('./handlers/onboarding');
 const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
-const { buildTimeISO, nowContext, getMalaysiaDateStr, extractTimeMs, detectRetroDate } = require('./utils/time');
+const { nowContext, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz } = require('./utils/time');
 
-const CONFIRM_WORDS = ['ok','okay','yes','log','log it','✅','yep','yup','looks good','good','sure','go'];
-const CANCEL_WORDS  = ['cancel','no','nope','skip','stop','abort'];
+const CONFIRM_WORDS = ['ok','okay','yes','log','log it','✅','yep','yup','looks good','good','sure','go',
+  'ок','окей','да','хорошо','ладно','давай','логировать','логируй','запиши','сохрани','подтверждаю'];
+const CANCEL_WORDS  = ['cancel','no','nope','skip','stop','abort','нет','отмена','отменить'];
 
 const pendingStates = new Map();
 const mediaGroups   = new Map();
@@ -49,6 +51,18 @@ async function downloadPhoto(bot, msg) {
   return Buffer.from(await res.arrayBuffer()).toString('base64');
 }
 
+async function handleRename(bot, msg, chatId) {
+  await bot.sendChatAction(chatId, 'typing');
+  const recentLogs = db.getRecentLogs(chatId, 7);
+  const parsed = await claude.parseRenameIntent(msg.text || '', recentLogs).catch(() => null);
+  if (!parsed?.new_name) { await bot.sendMessage(chatId, "couldn't figure out what to rename. try: \"rename my kettlebell workout to golf workout\""); return; }
+  const entry = parsed.entry_id
+    ? (recentLogs.find(e => e.id === parsed.entry_id) || null)
+    : db.getLastLogEntry(chatId, db.getState(chatId).current_day_start);
+  if (entry) { db.renameLog(entry.type, entry.id, parsed.new_name); await bot.sendMessage(chatId, `✅ "${entry.name}" renamed to "${parsed.new_name}"`); }
+  else await bot.sendMessage(chatId, "couldn't find that entry in your recent logs.");
+}
+
 async function handleDeletion(bot, msg, chatId, userState) {
   await bot.sendChatAction(chatId, 'typing');
   const dayStart = userState?.current_day_start;
@@ -56,7 +70,12 @@ async function handleDeletion(bot, msg, chatId, userState) {
     const entries = db.getTodayEntriesFromSQLite(chatId, dayStart);
     if (!entries.length) { await bot.sendMessage(chatId, 'Nothing logged today to delete.'); return; }
 
-    const match = await claude.matchEntryToDelete(msg.text, entries);
+    // "Last meal/entry/log" — don't rely on Haiku; entries are ASC so last meal = last in array
+    let match = null;
+    if (/\b(last|latest|most recent)\b/i.test(msg.text)) {
+      match = [...entries].reverse().find(e => e.label === 'Meal' || e.label === 'Drink') || null;
+    }
+    if (!match) match = await claude.matchEntryToDelete(msg.text, entries);
     if (!match) {
       const lines = ["Which entry to delete?\n", ...entries.map((e, i) => `${i+1}. [${e.label}] ${e.title}${e.extra ? ' — ' + e.extra : ''}`)];
       lines.push('\nReply "delete N" to remove.');
@@ -75,18 +94,41 @@ async function handleDeletion(bot, msg, chatId, userState) {
 }
 
 async function maybeTriggerCatchup(bot, chatId, wakeData) {
-  if (!wakeData?.prevDayStart) return;
-  const { getMalaysiaDate } = require('./utils/time');
-  const OFFSET_MS = 8 * 60 * 60 * 1000;
-  const prevDate = new Date(wakeData.prevDayStart + OFFSET_MS);
-  const retroDate = prevDate.toISOString().split('T')[0];
+  const tz = db.getState(chatId).timezone || 'Asia/Kuala_Lumpur';
+  const offsetMs = getOffsetMs(tz);
+  // Always offer the calendar day before today in the user's timezone — not prevDayStart,
+  // which would be wrong if they skipped a day entirely.
+  const todayStr = new Date(Date.now() + offsetMs).toISOString().split('T')[0];
+  const [ty, tm, td] = todayStr.split('-').map(Number);
+  const retroDate = new Date(Date.UTC(ty, tm - 1, td - 1)).toISOString().split('T')[0];
+  // dayStartMs: use prevDayStart if it falls on the retro date, else synthesise midnight of retro date
+  let dayStartMs = wakeData?.prevDayStart ?? null;
+  if (dayStartMs) {
+    const prevStr = new Date(dayStartMs + offsetMs).toISOString().split('T')[0];
+    if (prevStr !== retroDate) dayStartMs = null;
+  }
+  if (!dayStartMs) {
+    const [ry, rm, rd] = retroDate.split('-').map(Number);
+    dayStartMs = Date.UTC(ry, rm - 1, rd) - offsetMs;
+  }
   await bot.sendMessage(chatId, 'anything to catch up from yesterday?');
-  pendingStates.set(chatId, { type: 'catchup_log', retroDate, dayStartMs: wakeData.prevDayStart });
+  pendingStates.set(chatId, { type: 'catchup_log', retroDate, dayStartMs });
 }
 
 // ── Intent dispatcher ─────────────────────────────────────────────────────────
 
+const LOG_CLOSE_INTENTS = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','BED']);
+
 async function dispatchIntents(bot, msg, chatId, userState, intents) {
+  // Close any open coach chain when a log or bed intent arrives
+  if (intents.some(i => LOG_CLOSE_INTENTS.has(i))) {
+    const prevChainId = userState?.current_chain_id || userState?.last_coach_message_id;
+    if (prevChainId) {
+      const exchanges = db.countExchanges(chatId, prevChainId);
+      if (exchanges >= 1) closeChain(chatId, prevChainId).catch(() => {});
+    }
+  }
+
   // BED: highest priority
   if (intents.includes('BED')) {
     const text = (msg.text || '').toLowerCase();
@@ -98,6 +140,11 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     pendingStates.delete(chatId);
     await day.handleBedTime(bot, chatId, userState);
     pendingStates.set(chatId, { type: 'bed_plans', pushback_sent: false });
+    return;
+  }
+
+  if (intents.includes('RENAME')) {
+    await handleRename(bot, msg, chatId);
     return;
   }
 
@@ -120,6 +167,8 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
   const nonMeal  = intents.filter(i => !MEAL_SET.has(i));
   const hasMeal  = intents.some(i => MEAL_SET.has(i));
 
+  let workoutQueued = false; // track if we have a pending workout confirm
+
   for (const intent of nonMeal) {
     switch (intent) {
       case 'WORKOUT_START': {
@@ -129,16 +178,21 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
       }
       case 'WORKOUT_LOG': {
         const wData = await showWorkoutPreview(bot, msg);
-        if (wData) pendingStates.set(chatId, { type: 'workout_confirm', workoutData: wData, catchupRetro: msg._catchupRetro });
+        if (wData) {
+          pendingStates.set(chatId, { type: 'workout_confirm', workoutData: wData, catchupRetro: msg._catchupRetro });
+          workoutQueued = true;
+        }
         break;
       }
       case 'RECOVERY_LOG':  await handleRecovery(bot, msg);   break;
       case 'SLEEP_LOG':     await handleSleep(bot, msg);      break;
       case 'WEIGHT_LOG':    await handleBody(bot, msg);        break;
-      case 'PLAN':          await handlePlan(bot, msg);        break;
-      case 'PLAN_DONE':     await handlePlanDone(bot, msg);    break;
-      case 'PLAN_SKIP':     await handlePlanSkip(bot, msg);    break;
-      case 'UPDATE_TARGETS': await handleUpdateTargets(bot, msg, chatId); break;
+      case 'PLAN':           await handlePlan(bot, msg);                          break;
+      case 'PLAN_DONE':      await handlePlanDone(bot, msg);                       break;
+      case 'PLAN_SKIP':      await handlePlanSkip(bot, msg);                       break;
+      case 'CANCEL_REMINDER': await handleCancelReminder(bot, msg, chatId);        break;
+      case 'UPDATE_TIMEZONE': await handleTimezoneChange(bot, msg, chatId);        break;
+      case 'UPDATE_TARGETS': await handleUpdateTargets(bot, msg, chatId);          break;
       case 'WAKE':
         if (userState.status === 'sleeping') break; // handled by wake flow
         // deliberate fall-through
@@ -149,12 +203,18 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
 
   if (hasMeal) {
     const retroDate = msg._retroDate;
-    const data = await showMealPreview(bot, msg, null);
-    if (!data) {
-      pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: msg.text, dayStart: retroDate?.dayStartMs ?? userState?.current_day_start, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
+    const dayStart = retroDate?.dayStartMs ?? userState?.current_day_start;
+    if (workoutQueued) {
+      // Queue the meal to be shown after workout is confirmed/cancelled
+      const cur = pendingStates.get(chatId);
+      pendingStates.set(chatId, { ...cur, queuedMealMsg: msg, queuedMealDayStart: dayStart });
     } else {
-      // Both normal data and low-confidence partial data go to meal_confirm
-      pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart: retroDate?.dayStartMs ?? userState?.current_day_start, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
+      const data = await showMealPreview(bot, msg, null);
+      if (!data) {
+        pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: msg.text, dayStart, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
+      } else {
+        pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart, retroDate: retroDate?.dateStr, catchupRetro: msg._catchupRetro });
+      }
     }
   }
 }
@@ -175,7 +235,9 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
       group.timer = setTimeout(async () => {
         mediaGroups.delete(gid);
         const cap = group.firstMsg.caption || '';
-        if (isPhotoQuestion(cap)) { await handlePhotoQuestion(bot, group.firstMsg, group.photos[0]); return; }
+        const capIntents = cap ? await claude.classify(cap, []).catch(() => []) : [];
+        const isQuestion = capIntents.includes('COACH_QUESTION') && !capIntents.some(i => i === 'MEAL_LOG' || i === 'DRINK_LOG');
+        if (isQuestion) { await handlePhotoQuestion(bot, group.firstMsg, group.photos[0]); return; }
         const data = await showMealPreview(bot, group.firstMsg, group.photos);
         if (data) pendingStates.set(group.chatId, { type: 'meal_confirm', mealData: data, dayStart: group.dayStart });
         else pendingStates.set(group.chatId, { type: 'meal_photo_clarification', caption: group.firstMsg.caption || '', photo: group.photos[0], dayStart: group.dayStart });
@@ -184,14 +246,13 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
     }
 
     const cap = msg.caption || '';
-    if (isPhotoQuestion(cap)) {
-      await handlePhotoQuestion(bot, msg, await downloadPhoto(bot, msg));
-      return;
-    }
-    if (cap.length > 40) {
-      pendingStates.set(chatId, { type: 'photo_clarification', originalMsg: msg, photos: [await downloadPhoto(bot, msg)], dayStart });
-      await bot.sendMessage(chatId, 'Log this as a meal, or are you asking a question? Reply "log" or "question".');
-      return;
+    if (cap) {
+      const capIntents = await claude.classify(cap, []).catch(() => []);
+      const isQuestion = capIntents.includes('COACH_QUESTION') && !capIntents.some(i => i === 'MEAL_LOG' || i === 'DRINK_LOG');
+      if (isQuestion) {
+        await handlePhotoQuestion(bot, msg, await downloadPhoto(bot, msg));
+        return;
+      }
     }
     const photo = await downloadPhoto(bot, msg);
     const data = await showMealPreview(bot, msg, photo);
@@ -232,7 +293,7 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
   const intents = preIntents?.length ? preIntents : await claude.classify(msg.text, db.getHistory(chatId, 10));
   db.logMessage(chatId, msg.text, intents.join(','), msg.message_id);
   if (!msg._retroDate) {
-    const retro = detectRetroDate(msg.text);
+    const retro = detectRetroDate(msg.text, userState.timezone || 'Asia/Kuala_Lumpur');
     if (retro) msg._retroDate = retro;
   }
   await dispatchIntents(bot, msg, chatId, userState, intents);
@@ -288,14 +349,33 @@ function startBot() {
       return;
     }
 
-    // ── COACH_REPLY: user swiped-replied to a coach message ──────────────────
+    // ── REPLY: rename log or coach reply ─────────────────────────────────────
     if (msg.reply_to_message?.message_id) {
       const repState = db.getState(chatId);
-      if (repState.last_coach_message_id && msg.reply_to_message.message_id === repState.last_coach_message_id) {
+      const repliedMsgId = msg.reply_to_message.message_id;
+      const text = msg.text || '';
+
+      // Rename via reply — let Claude extract the new name
+      if (/rename|call it|log.*as|name it|переименуй|назови/i.test(text)) {
+        const parsed = await claude.parseRenameIntent(text).catch(() => null);
+        if (parsed?.new_name) {
+          const entry = db.getLogByBotMessageId(chatId, repliedMsgId);
+          if (entry) {
+            db.renameLog(entry.type, entry.id, parsed.new_name);
+            await bot.sendMessage(chatId, `✅ renamed to "${parsed.new_name}"`);
+          } else {
+            await bot.sendMessage(chatId, "couldn't find that log entry.");
+          }
+          return;
+        }
+      }
+
+      if (repState.last_coach_message_id && repliedMsgId === repState.last_coach_message_id) {
         await handleCoachReply(bot, msg, repState.last_coach_message_id);
         return;
       }
     }
+
 
     // ── Log every user message immediately so wasRecentlyActive works ──────────
     if (msg.text) {
@@ -303,12 +383,42 @@ function startBot() {
       db.logMessage(chatId, msg.text, 'incoming', msg.message_id);
     }
 
+    // ── Translate non-English messages to English before processing ───────────
+    if (msg.text && userState.language && !/^en(glish)?$/i.test(userState.language.trim())) {
+      const hasForeignChars = /[а-яА-ЯёЁ\u4e00-\u9fff\u0600-\u06ff\u0e00-\u0e7f\u3040-\u30ff]/.test(msg.text);
+      if (hasForeignChars) {
+        try {
+          const translated = await claude.translateToEnglish(msg.text);
+          if (translated) msg = { ...msg, text: translated };
+        } catch {}
+      }
+    }
+
     // ── Classify early — used for wake/bed detection before state routing ─────
     let earlyIntents = [];
     if (msg.text) {
       await bot.sendChatAction(chatId, 'typing');
+      // RENAME is classified without history — history can get poisoned by past failed attempts
+      const renameCheck = await claude.classify(msg.text, []).catch(() => []);
+      if (renameCheck.includes('RENAME')) {
+        await handleRename(bot, msg, chatId);
+        return;
+      }
       const history = db.getHistory(chatId, 10);
       try { earlyIntents = await claude.classify(msg.text, history); } catch {}
+      if (earlyIntents.includes('RENAME')) {
+        await handleRename(bot, msg, chatId);
+        return;
+      }
+    }
+    // BED: explicit phrases are unambiguous — don't let history poison them
+    // Allow short ack prefix (yeah/ok/alright) before the bed phrase, e.g. "Yeah gn"
+    const BED_SUFFIX = /(gn|g\.n\.|good\s+night|goodnight|going\s+to\s+bed|heading\s+to\s+bed|off\s+to\s+bed|going\s+to\s+sleep|time\s+to\s+sleep|bed\s*time)[\s!.,]*$/i;
+    if (msg.text && msg.text.trim().split(/\s+/).length <= 4 && BED_SUFFIX.test(msg.text.trim()) && !earlyIntents.includes('BED')) {
+      earlyIntents = [...earlyIntents, 'BED'];
+    }
+    if (isWakeTrigger(msg) && !earlyIntents.includes('WAKE')) {
+      earlyIntents = [...earlyIntents, 'WAKE'];
     }
     const isWake = earlyIntents.includes('WAKE');
     const isBed  = earlyIntents.includes('BED');
@@ -367,15 +477,12 @@ function startBot() {
     }
 
     // ── Wake detection ────────────────────────────────────────────────────────
-    // Also trigger if status stayed 'awake' (user fell asleep without saying gn) and it's been 18+ hours
-    const implicitNewDay = userState.status === 'awake'
-      && userState.current_day_start
-      && (Date.now() - userState.current_day_start) > 18 * 3600 * 1000;
-    if (isWake && (userState.status === 'sleeping' || implicitNewDay)) {
+    if (isWake && (userState.status === 'sleeping' || userState.status === 'awake')) {
       pendingStates.delete(chatId);
-      const isMonday = new Date(Date.now() + 8 * 3600 * 1000).getUTCDay() === 1;
+      const isMonday = new Date(Date.now() + getOffsetMs(userState.timezone)).getUTCDay() === 1;
       db.setState(chatId, { bed_nudge_sent: 0, weekly_waiting_weight: isMonday ? 1 : 0 });
-      const wakeOverride = extractTimeMs(msg.text);
+      const rawWakeOverride = extractTimeMs(msg.text, userState.timezone);
+      const wakeOverride = (rawWakeOverride && rawWakeOverride <= Date.now()) ? rawWakeOverride : null;
       const wakeData = await day.handleMorningWake(bot, chatId, userState, wakeOverride);
       pendingStates.set(chatId, { type: 'morning_quality', wakeData, pendingMsg: msg, pendingIntents: earlyIntents });
       return;
@@ -401,11 +508,12 @@ function startBot() {
         pendingStates.delete(chatId);
         if (!state.wakeData.hasBed) {
           // No bed time recorded — ask before logging sleep
-          await bot.sendMessage(chatId, 'what time did you fall asleep? (e.g. 1am, or skip)');
+          await bot.sendMessage(chatId, 'what time did you fall asleep?');
           pendingStates.set(chatId, { type: 'morning_bed_time', quality, wakeData: state.wakeData, pendingMsg: state.pendingMsg, pendingIntents: state.pendingIntents });
           return;
         }
         await day.processQuality(bot, chatId, quality, state.wakeData);
+        cronSvc.scheduleUntimedRemindersForUser(chatId, state.wakeData.newDayStart);
         const curStateAfter = db.getState(chatId);
         if (curStateAfter.weekly_waiting_weight) {
           await bot.sendMessage(chatId, '📋 it\'s monday — log your weight + body fat for the weekly review.');
@@ -426,8 +534,10 @@ function startBot() {
         const skip = /^(skip|no|idk|dunno|don't know|not sure|-)$/.test(text);
         let wakeData = state.wakeData;
         if (!skip) {
-          const bedMs = extractTimeMs(msg.text);
+          let bedMs = extractTimeMs(msg.text, db.getState(chatId).timezone);
           if (bedMs) {
+            // If parsed bed time is after wake time, it's from the previous day
+            if (bedMs > wakeData.newDayStart) bedMs -= 24 * 3600 * 1000;
             wakeData = { ...wakeData, hasBed: true, bedMs };
             const sleepMs = Math.max(0, wakeData.newDayStart - bedMs - 20 * 60 * 1000);
             wakeData.sleepH = Math.round(sleepMs / 3600000 * 10) / 10;
@@ -435,6 +545,7 @@ function startBot() {
         }
         pendingStates.delete(chatId);
         await day.processQuality(bot, chatId, state.quality, wakeData);
+        cronSvc.scheduleUntimedRemindersForUser(chatId, wakeData.newDayStart);
         const curStateAfter = db.getState(chatId);
         if (curStateAfter.weekly_waiting_weight) {
           await bot.sendMessage(chatId, '📋 it\'s monday — log your weight + body fat for the weekly review.');
@@ -521,22 +632,33 @@ function startBot() {
         const text = msg.text || '';
         const isWorkoutCancel = text.trim().split(/\s+/).length <= 3
           && /^(no|nope|cancel|skip|stop|abort|nevermind|never mind)$/i.test(text.trim());
-        if (isWorkoutCancel) {
-          pendingStates.delete(chatId);
-          await bot.sendMessage(chatId, '❌ Cancelled.');
-          return;
-        }
-        const isWCorrection = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i));
 
-        if (isConfirmation(text) && !isWCorrection) {
+        const finishWorkout = async (log) => {
           pendingStates.delete(chatId);
-          await logWorkout(bot, chatId, state.workoutData, userState.current_day_start);
-          if (state.catchupRetro) {
+          if (log) await logWorkout(bot, chatId, state.workoutData, userState.current_day_start);
+          else     await bot.sendMessage(chatId, '❌ Cancelled.');
+          // Process queued meal if any
+          if (state.queuedMealMsg) {
+            const retroDate = state.queuedMealMsg._retroDate;
+            const data = await showMealPreview(bot, state.queuedMealMsg, null);
+            if (!data) {
+              pendingStates.set(chatId, { type: 'meal_text_clarification', originalText: state.queuedMealMsg.text, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
+            } else {
+              pendingStates.set(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
+            }
+            return;
+          }
+          if (log && state.catchupRetro) {
             await bot.sendMessage(chatId, 'anything else? (or done)');
             pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
           }
-          return;
-        }
+        };
+
+        if (isWorkoutCancel) { await finishWorkout(false); return; }
+
+        const isWCorrection = earlyIntents.some(i => ['WORKOUT_LOG','CORRECTION'].includes(i));
+
+        if (isConfirmation(text) && !isWCorrection) { await finishWorkout(true); return; }
 
         if (isWCorrection) {
           pendingStates.delete(chatId);
@@ -545,7 +667,7 @@ function startBot() {
             const updated = await claude.applyWorkoutCorrection(state.workoutData, text);
             updated.calories_burned = computeWorkoutCalories(chatId, updated);
             await bot.sendMessage(chatId, formatWorkoutPreview(updated));
-            pendingStates.set(chatId, { type: 'workout_confirm', workoutData: updated, catchupRetro: state.catchupRetro });
+            pendingStates.set(chatId, { ...state, type: 'workout_confirm', workoutData: updated });
           } catch {
             await bot.sendMessage(chatId, '❌ Could not apply correction.');
           }
@@ -557,16 +679,29 @@ function startBot() {
           return;
         }
 
-        pendingStates.delete(chatId);
-        await logWorkout(bot, chatId, state.workoutData, userState.current_day_start);
-        if (state.catchupRetro) {
-          await bot.sendMessage(chatId, 'anything else? (or done)');
-          pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+        // New log item arrived while workout pending → queue it, don't auto-log
+        const LOG_INTENTS_Q = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','WEIGHT_LOG','PLAN']);
+        if (earlyIntents.some(i => LOG_INTENTS_Q.has(i))) {
+          if (!state.queuedMealMsg && earlyIntents.some(i => MEAL_SET.has(i))) {
+            pendingStates.set(chatId, { ...state, queuedMealMsg: msg, queuedMealDayStart: userState.current_day_start });
+          }
+          await bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData));
+          return;
         }
+
+        // Unrecognised — show preview again
+        await bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData));
         return;
       }
 
       if (state.type === 'meal_photo_clarification') {
+        // COACH_QUESTION escape — user is asking about the stored photo, not describing food
+        const isPhotoQuestion = earlyIntents.includes('COACH_QUESTION') && !earlyIntents.some(i => i === 'MEAL_LOG' || i === 'DRINK_LOG');
+        if (isPhotoQuestion) {
+          pendingStates.delete(chatId);
+          await handlePhotoQuestion(bot, { ...msg, caption: msg.text }, state.photo);
+          return;
+        }
         pendingStates.delete(chatId);
         const fakeMsg = { ...msg, caption: `${state.caption}. ${msg.text || ''}`, text: undefined };
         const data = await showMealPreview(bot, fakeMsg, state.photo);
@@ -589,9 +724,7 @@ function startBot() {
         const text = msg.text || '';
         const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
 
-        // Cancel only on standalone short cancel messages — never on sentences that start with "no"
-        const isExplicitCancel = text.trim().split(/\s+/).length <= 3
-          && /^(no|nope|cancel|skip|stop|abort|nevermind|never mind)$/i.test(text.trim());
+        const isExplicitCancel = isCancellation(text);
         if (isExplicitCancel) {
           pendingStates.delete(chatId);
           await bot.sendMessage(chatId, '❌ Cancelled. Nothing logged.');
@@ -604,8 +737,10 @@ function startBot() {
 
         const isCorrectionIntent = earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i));
 
+        // Short standalone confirm words (≤3 words) always confirm regardless of classifier intent
+        const isShortConfirm = isConfirmation(text) && text.trim().split(/\s+/).length <= 3;
         // Explicit confirmation → if clarification pending, show preview first; otherwise log
-        if (isConfirmation(text) && !isCorrectionIntent) {
+        if (isShortConfirm || (isConfirmation(text) && !isCorrectionIntent)) {
           if (state.needsClarification) {
             // Show the preview so user sees what's being logged, then await final confirm
             pendingStates.set(chatId, { ...state, needsClarification: false });
@@ -637,12 +772,12 @@ function startBot() {
           return;
         }
 
-        // Anything else (ambiguous reply) → log
-        pendingStates.delete(chatId);
-        await logMeal(bot, chatId, mealData, state.dayStart);
-        if (state.catchupRetro) {
-          await bot.sendMessage(chatId, 'anything else? (or done)');
-          pendingStates.set(chatId, { type: 'catchup_log', ...state.catchupRetro });
+        // Anything else while reviewing a meal → treat as correction, not silent log
+        {
+          const updated = await applyCorrection(bot, chatId, mealData, text);
+          if (!updated) return;
+          await bot.sendMessage(chatId, formatPreview(updated));
+          pendingStates.set(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
         }
         return;
       }
@@ -665,6 +800,18 @@ function startBot() {
           // Immediate log (workout/recovery/sleep), ask for more
           await bot.sendMessage(chatId, 'anything else? (or done)');
           pendingStates.set(chatId, { type: 'catchup_log', ...catchupRetro });
+        }
+        return;
+      }
+
+      if (state.type === 'weekly_target_suggest') {
+        const isPositive = await claude.isPositiveResponse(msg.text || '').catch(() => false);
+        if (isPositive) {
+          pendingStates.delete(chatId);
+          await handleUpdateTargets(bot, msg, chatId);
+        } else {
+          pendingStates.delete(chatId);
+          await routeMessage(bot, msg, chatId, userState, earlyIntents);
         }
         return;
       }
@@ -708,8 +855,21 @@ async function handleUpdateTargets(bot, msg, chatId) {
   await bot.sendChatAction(chatId, 'typing');
   try {
     const current = notion.getTargets(chatId);
-    const newTargets = await claude.recalculateTargets(current, msg.text || '');
-    if (!newTargets || !newTargets.calories) { await bot.sendMessage(chatId, "couldn't figure that out. try: 'change calories to 1800'"); return; }
+    // Include the last coach message as context so "yes" can resolve to the numbers just suggested
+    const state = db.getState(chatId);
+    let lastCoachMsg = '';
+    try {
+      const ctx = state.last_coach_context ? JSON.parse(state.last_coach_context) : null;
+      if (ctx?.message) lastCoachMsg = `\n\nPrevious coach message (may contain suggested values):\n${ctx.message}`;
+    } catch {}
+    const instruction = (msg.text || '') + lastCoachMsg;
+    const newTargets = await claude.recalculateTargets(current, instruction);
+    if (!newTargets || !newTargets.calories) {
+      // No specific numbers — let the coach handle it
+      const { handleAsk } = require('./handlers/ask');
+      await handleAsk(bot, msg);
+      return;
+    }
     await notion.updateTargets(chatId, newTargets);
     await bot.sendMessage(chatId,
       `✅ targets updated:\n${newTargets.calories} kcal · ${newTargets.protein}g P · ${newTargets.carbs}g C · ${newTargets.fat}g F`
@@ -718,6 +878,74 @@ async function handleUpdateTargets(bot, msg, chatId) {
     console.error('Update targets error:', err.message);
     await bot.sendMessage(chatId, '❌ Failed to update targets. Try again.');
   }
+}
+
+// ── Cancel reminder (keep plan) ───────────────────────────────────────────────
+
+async function handleCancelReminder(bot, msg, chatId) {
+  await bot.sendChatAction(chatId, 'typing');
+  try {
+    const pending = db.getAllPending(chatId);
+    if (!pending.length) { await bot.sendMessage(chatId, 'No upcoming plans found.'); return; }
+    const plan = await claude.matchPlanToModify(msg.text, pending);
+    db.cancelPlanReminders(chatId, plan.id);
+    await bot.sendMessage(chatId, `Got it — reminder cancelled for ${plan.plan_text}. Plan is still on your list.`);
+  } catch (err) {
+    console.error('Cancel reminder error:', err.message);
+    await bot.sendMessage(chatId, '❌ Could not cancel reminder.');
+  }
+}
+
+// ── Timezone change ────────────────────────────────────────────────────────────
+
+const TIMEZONE_MAP = {
+  'kuala lumpur': 'Asia/Kuala_Lumpur', 'kl': 'Asia/Kuala_Lumpur', 'malaysia': 'Asia/Kuala_Lumpur',
+  'singapore': 'Asia/Singapore', 'jakarta': 'Asia/Jakarta', 'bangkok': 'Asia/Bangkok',
+  'moscow': 'Europe/Moscow', 'москва': 'Europe/Moscow', 'russia': 'Europe/Moscow',
+  'london': 'Europe/London', 'paris': 'Europe/Paris', 'berlin': 'Europe/Berlin',
+  'new york': 'America/New_York', 'los angeles': 'America/Los_Angeles',
+  'dubai': 'Asia/Dubai', 'hong kong': 'Asia/Hong_Kong', 'tokyo': 'Asia/Tokyo',
+  'seoul': 'Asia/Seoul', 'sydney': 'Australia/Sydney',
+};
+
+function parseTzFromText(text) {
+  const lc = text.toLowerCase();
+  // Try named city
+  const named = TIMEZONE_MAP[lc] || TIMEZONE_MAP[Object.keys(TIMEZONE_MAP).find(k => lc.includes(k))];
+  if (named) return named;
+  // Try UTC±N
+  const utcMatch = lc.match(/utc\s*([+-])\s*(\d{1,2})(?::(\d{2}))?/);
+  if (utcMatch) {
+    const sign = utcMatch[1] === '+' ? 1 : -1;
+    const h = parseInt(utcMatch[2]);
+    const m = parseInt(utcMatch[3] || '0');
+    const offsetMin = sign * (h * 60 + m);
+    // Map common offsets to IANA zones
+    const offsetMap = { '-480': 'America/Los_Angeles', '-300': 'America/New_York', 0: 'Europe/London', 60: 'Europe/Paris', 180: 'Europe/Moscow', 300: 'Asia/Dubai', 330: 'Asia/Kolkata', 420: 'Asia/Bangkok', 480: 'Asia/Kuala_Lumpur', 540: 'Asia/Tokyo', 600: 'Australia/Sydney' };
+    return offsetMap[String(offsetMin)] || `Etc/GMT${sign > 0 ? '-' : '+'}${h}`; // Etc/GMT sign is inverted
+  }
+  return null;
+}
+
+async function handleTimezoneChange(bot, msg, chatId) {
+  await bot.sendChatAction(chatId, 'typing');
+  const tz = parseTzFromText(msg.text || '');
+  if (!tz) { await bot.sendMessage(chatId, "Couldn't identify the timezone. Try: \"set timezone to Moscow\" or \"UTC+3\"."); return; }
+  db.setState(chatId, { timezone: tz });
+  // Wipe and reschedule reminders with new offset
+  db.deleteUnfiredReminders(chatId);
+  const { scheduleTimedPlanReminders } = require('./handlers/plans');
+  const offsetMs = getOffsetMs(tz);
+  const today = getDateStrTz(tz);
+  const tomorrow = new Date(Date.now() + offsetMs + 86400000).toISOString().split('T')[0];
+  for (const dateStr of [today, tomorrow]) {
+    for (const plan of db.getPendingTimed(chatId, dateStr)) {
+      scheduleTimedPlanReminders(chatId, plan.id, { title: plan.plan_text, date: plan.plan_date, time: plan.plan_time });
+    }
+  }
+  const sign = offsetMs >= 0 ? '+' : '-';
+  const hrs = Math.abs(Math.round(offsetMs / 3600000));
+  await bot.sendMessage(chatId, `Timezone set to ${tz} (UTC${sign}${hrs}). Reminders rescheduled.`);
 }
 
 // ── Weekly review flow ────────────────────────────────────────────────────────
@@ -731,13 +959,21 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     const weekStartMs = now - 7 * 24 * 3600 * 1000;
     const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
     const targetsCtx = notion.getTargetsText(chatId);
+    const targets    = notion.getTargets(chatId);
 
-    const review = await claude.generateWeeklyReview(weekData, targetsCtx);
+    const review = await claude.generateWeeklyReview(weekData, targetsCtx, db.getState(chatId), targets);
     const sent = await bot.sendMessage(chatId, review);
 
-    await notion.createCoachNote(`Weekly Review — ${getMalaysiaDateStr()}`, review, 'Weekly Review').catch(() => {});
-    db.setState(chatId, { last_coach_message_id: sent.message_id });
+    await notion.createCoachNote(chatId, `Weekly Review — ${getDateStrTz(db.getState(chatId).timezone)}`, review, 'Weekly Review').catch(() => {});
+    db.setState(chatId, {
+      last_coach_message_id: sent.message_id,
+      last_coach_context: JSON.stringify({ message: review, context: '', timestamp: Date.now() }),
+    });
     db.saveCoachMessage(chatId, 'assistant', review, sent.message_id);
+    // If review suggested target changes, flag so next reply can apply them
+    if (/want me to update|apply.*target|update.*target/i.test(review)) {
+      pendingStates.set(chatId, { type: 'weekly_target_suggest' });
+    }
 
     // Weekly strength summary (fire-and-forget)
     try {

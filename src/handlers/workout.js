@@ -5,10 +5,22 @@ const { calculateTDEE } = require('../utils/tdee');
 
 // Server-side calorie calculation — overrides Claude's estimate so LLM math errors can't slip through
 function computeWorkoutCalories(chatId, data) {
-  const targets = db.getTargetsFromDb(chatId);
-  const weight  = targets.weight_kg ?? 105;
-  const dur     = data.duration_min ?? 0;
-  if (!dur) return data.calories_burned ?? 0;
+  const lastBody = db.getLastBodyMeasurement(chatId);
+  const targets  = db.getTargetsFromDb(chatId);
+  const weight   = lastBody?.weight_kg ?? targets.weight_kg ?? 105;
+  let dur = data.duration_min ?? 0;
+  if (!dur) {
+    // Estimate duration from set count when not logged
+    const exercises = data.exercises ?? [];
+    const totalSets = exercises.reduce((s, e) => {
+      if (e.sets_detail?.length) return s + e.sets_detail.reduce((a, d) => a + (d.sets ?? 1), 0);
+      return s + (e.sets ?? 1);
+    }, 0);
+    const actType = (data.activity_type ?? '').toLowerCase();
+    const minPerSet = (actType.includes('hiit') || actType.includes('circuit')) ? 1.5 : 3;
+    dur = totalSets > 0 ? Math.round(totalSets * minPerSet) : 0;
+    if (!dur) return data.calories_burned ?? 0;
+  }
 
   const actType = (data.activity_type ?? '').toLowerCase();
 
@@ -73,7 +85,10 @@ async function showWorkoutPreview(bot, msg) {
       if (e.sets && e.reps || e.weight_kg) s += ')';
       return s;
     }).join('\n');
-    const data = await claude.parseWorkout(msg.text || msg.caption || '', knownCtx);
+    const body = db.getLastBodyMeasurement(chatId);
+    const tgts = db.getTargetsFromDb(chatId);
+    const userWeight = body?.weight_kg ?? tgts.weight_kg ?? 80;
+    const data = await claude.parseWorkout(msg.text || msg.caption || '', knownCtx, userWeight);
     if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
     data.calories_burned = computeWorkoutCalories(chatId, data);
     await bot.sendMessage(chatId, formatWorkoutPreview(data));
@@ -87,12 +102,13 @@ async function showWorkoutPreview(bot, msg) {
 
 async function logWorkout(bot, chatId, data, dayStart) {
   try {
-    db.saveWorkoutLog(chatId, data, dayStart);
+    const workoutId = db.saveWorkoutLog(chatId, data, dayStart);
     await notion.createWorkoutEntry(chatId, data);
     const dur = data.duration_min ? `${data.duration_min} min` : null;
     const cal = data.calories_burned ? `~${data.calories_burned} kcal` : null;
     const retro = data.date ? ` (${data.date})` : '';
-    await bot.sendMessage(chatId, `✅ ${[data.workout_name + retro, dur, cal].filter(Boolean).join(' — ')}`);
+    const sent = await bot.sendMessage(chatId, `✅ ${[data.workout_name + retro, dur, cal].filter(Boolean).join(' — ')}`);
+    db.setLogBotMessageId('workout_log', workoutId, sent.message_id);
     // Auto-save exercises to known_exercises (fire-and-forget)
     for (const ex of (data.exercises || [])) {
       if (!ex.name) continue;

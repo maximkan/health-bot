@@ -22,7 +22,7 @@ function formatPreview(data) {
 }
 
 function formatConfirmation(data, totals, targets) {
-  const T = targets || { calories: 1600, protein: 220 };
+  const T = targets;
   const cal  = Math.round(totals?.calories ?? 0);
   const prot = Math.round(totals?.protein  ?? 0);
   const calLeft  = T.calories - cal;
@@ -34,8 +34,8 @@ function formatConfirmation(data, totals, targets) {
   if ((data.caffeine_mg ?? 0) > 0) lines[0] += ` · ☕ ${data.caffeine_mg}mg`;
   if (totals && !data.date) {
     lines.push(`📊 today: ${cal} / ${T.calories} kcal · ${prot} / ${T.protein}g P`);
-    if (calLeft > 0)  lines.push(`${calLeft} kcal left 💪`);
-    else              lines.push(`⚠️ ${Math.abs(calLeft)} kcal over target`);
+    if (calLeft > 0)       lines.push(`${calLeft} kcal left 💪`);
+    else if (calLeft < -50) lines.push(`⚠️ ${Math.abs(calLeft)} kcal over target`);
   }
   return lines.join('\n');
 }
@@ -51,14 +51,25 @@ async function showMealPreview(bot, msg, photos) {
     const dayOfWeek = getDayOfWeek();
     const weekType  = getCurrentWeekType();
     let knownFoodsCtx = '';
-    try { knownFoodsCtx = await notion.getKnownFoodsContext(dayOfWeek, weekType); } catch {}
+    try { knownFoodsCtx = notion.getKnownFoodsContext(chatId, dayOfWeek, weekType); } catch {}
 
     const { nowContext } = require('../utils/time');
-    const data = await claude.analyzeMeal(photoList, caption, dayOfWeek, knownFoodsCtx, nowContext());
+    const userState = db.getState(chatId);
+    const institutionKeywords = userState?.institution_keywords || null;
+
+    let captionWithCtx = caption;
+    if (userState?.current_chain_id) {
+      const chain = db.getReplyChain(chatId, userState.current_chain_id);
+      const lastBot = chain.filter(m => m.role === 'assistant').slice(-1)[0];
+      if (lastBot) captionWithCtx = `${caption}\n\n[Recent coach context: ${lastBot.content.slice(0, 300)}]`;
+    }
+
+    const data = await claude.analyzeMeal(photoList, captionWithCtx, dayOfWeek, knownFoodsCtx, nowContext(), institutionKeywords);
 
     if (data.confidence === 'low' && data.clarification) {
       await bot.sendMessage(chatId, `🤔 ${data.clarification}`);
-      return null;
+      data._needsClarification = true;
+      return data;
     }
 
     await bot.sendMessage(chatId, formatPreview(data));
@@ -74,22 +85,26 @@ async function showMealPreview(bot, msg, photos) {
 
 async function logMeal(bot, chatId, data, dayStart) {
   try {
-    await notion.createMealEntry(data);
+    // Always write to SQLite first — this is the source of truth
+    const mealId = db.saveMealLog(chatId, data, dayStart);
+
     const caffeineMg = data.caffeine_mg ?? 0;
     if (caffeineMg > 0) db.addCaffeine(chatId, caffeineMg);
-    // Auto-save non-retroactive meals to known foods (fire-and-forget)
-    if (!data.date) notion.addKnownFood(data).catch(() => {});
+    if (!data.date) notion.addKnownFood(chatId, data).catch(() => {});
 
-    console.log(`logMeal dayStart=${dayStart} (${dayStart ? new Date(dayStart).toISOString() : 'null'})`);
+    // Notion is best-effort — never let it block or fail the user's confirmation
+    notion.createMealEntry(chatId, data).catch(err => console.error('Notion meal sync error:', err.message));
+
     let totals  = null;
     let targets = null;
-    try { totals  = await notion.getDailyMealTotals(dayStart); } catch {}
-    try { targets = notion.getTargets(); } catch {}
+    try { totals  = db.getDailyMealTotalsFromSQLite(chatId, dayStart); } catch {}
+    try { targets = notion.getTargets(chatId); } catch {}
 
-    await bot.sendMessage(chatId, formatConfirmation(data, totals, targets));
+    const sent = await bot.sendMessage(chatId, formatConfirmation(data, totals, targets));
+    db.setLogBotMessageId('meal_log', mealId, sent.message_id);
   } catch (err) {
     console.error('Meal log error:', err.message);
-    await bot.sendMessage(chatId, '❌ Failed to write to Notion. Try again.');
+    await bot.sendMessage(chatId, '❌ Failed to save meal. Try again.');
   }
 }
 

@@ -8,6 +8,18 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS recovery_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    rounds INTEGER DEFAULT 1,
+    duration_per_round_min INTEGER,
+    total_duration_min INTEGER,
+    temperature_c REAL,
+    notes TEXT,
+    logged_at INTEGER NOT NULL,
+    day_start INTEGER
+  );
   CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER,
@@ -36,13 +48,6 @@ db.exec(`
     message_type TEXT,
     timestamp TEXT,
     telegram_message_id INTEGER
-  );
-  CREATE TABLE IF NOT EXISTS golf_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER,
-    role TEXT,
-    content TEXT,
-    timestamp TEXT
   );
 `);
 
@@ -76,7 +81,20 @@ addCol('user_state', 'wake_time_pref', 'TEXT');
 addCol('user_state', 'timezone', 'TEXT DEFAULT "Asia/Kuala_Lumpur"');
 addCol('user_state', 'gender', 'TEXT DEFAULT "male"');
 addCol('user_state', 'last_proactive_date', 'TEXT');
-addCol('user_state', 'last_proactive_msg', 'TEXT');;
+addCol('user_state', 'last_proactive_msg', 'TEXT');
+addCol('user_state', 'user_profile', 'TEXT');
+addCol('user_state', 'body_metrics', 'TEXT DEFAULT "weight"');
+addCol('user_state', 'user_reminders', 'TEXT DEFAULT "[]"');
+addCol('user_state', 'institution_keywords', 'TEXT DEFAULT NULL');
+addCol('sleep_log', 'type', 'TEXT DEFAULT "Night"');
+addCol('recovery_log', 'protocol', 'TEXT DEFAULT "single"');
+addCol('recovery_log', 'protocol_id', 'TEXT');
+addCol('recovery_log', 'sequence_order', 'INTEGER DEFAULT 1');
+addCol('recovery_log', 'round_number', 'INTEGER');
+addCol('meal_log', 'bot_message_id', 'INTEGER');
+addCol('meal_log', 'meal_time', 'TEXT');
+addCol('workout_log', 'bot_message_id', 'INTEGER');
+addCol('workout_log', 'workout_time', 'TEXT');
 
 addCol('plans', 'gcal_event_id', 'TEXT');
 
@@ -248,7 +266,25 @@ db.exec(`
     text TEXT,
     created_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS body_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    weight_kg REAL,
+    body_fat_pct REAL,
+    muscle_mass_kg REAL,
+    bmi REAL,
+    notes TEXT,
+    logged_at INTEGER NOT NULL
+  );
 `);
+
+db.exec(`CREATE TABLE IF NOT EXISTS coach_conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER NOT NULL,
+  messages_json TEXT,
+  summary TEXT,
+  closed_at INTEGER NOT NULL
+)`);
 
 // ── Dynamic user state ────────────────────────────────────────────────────────
 
@@ -284,11 +320,9 @@ function savePlan(chatId, { text, date, time, recurring = 'one-time', guests, lo
   return _savePlan.run(chatId, text, date || null, time || null, recurring, guests ? JSON.stringify(guests) : null, location || null).lastInsertRowid;
 }
 
-const getPlansByDate    = (chatId, date) => db.prepare("SELECT * FROM plans WHERE chat_id=? AND plan_date=? AND status NOT IN ('done','skipped') ORDER BY plan_time ASC").all(chatId, date);
 const getPendingUntimed = (chatId)       => db.prepare("SELECT * FROM plans WHERE chat_id=? AND plan_time IS NULL AND status='pending' ORDER BY created_at ASC").all(chatId);
 const getPendingTimed   = (chatId, date) => db.prepare("SELECT * FROM plans WHERE chat_id=? AND plan_date=? AND plan_time IS NOT NULL AND status IN ('pending','reminded') ORDER BY plan_time ASC").all(chatId, date);
 const updatePlanStatus  = (id, status)   => db.prepare("UPDATE plans SET status=? WHERE id=?").run(status, id);
-const markPlanReminded  = (id)           => db.prepare("UPDATE plans SET status='reminded',last_reminded=datetime('now') WHERE id=?").run(id);
 const setPlanNotionId   = (id, pageId)   => db.prepare("UPDATE plans SET notion_page_id=? WHERE id=?").run(pageId, id);
 const setPlanCalendar   = (id)           => db.prepare("UPDATE plans SET calendar_event_created=1 WHERE id=?").run(id);
 const setPlanGCalId     = (id, eventId)  => db.prepare('UPDATE plans SET gcal_event_id=? WHERE id=?').run(eventId, id);
@@ -308,7 +342,6 @@ const clearReplyChain  = (chatId, coachMsgId) => db.prepare('DELETE FROM coach_r
 // ── Message log ───────────────────────────────────────────────────────────────
 
 const logMessage        = (chatId, text, type, tgId) => db.prepare("INSERT INTO message_log (chat_id,message_text,message_type,timestamp,telegram_message_id) VALUES (?,?,?,datetime('now'),?)").run(chatId, text, type, tgId ?? null);
-const getRecentMessages = (chatId, limit = 5) => db.prepare('SELECT * FROM message_log WHERE chat_id=? ORDER BY id DESC LIMIT ?').all(chatId, limit);
 
 function wasRecentlyActive(chatId, withinMinutes = 15) {
   const row = db.prepare("SELECT timestamp FROM message_log WHERE chat_id=? ORDER BY id DESC LIMIT 1").get(chatId);
@@ -319,10 +352,26 @@ function wasRecentlyActive(chatId, withinMinutes = 15) {
 
 // ── Reminders ─────────────────────────────────────────────────────────────────
 
-const saveReminder      = (chatId, fireMs, text) => db.prepare("INSERT INTO reminders (chat_id, fire_ms, text) VALUES (?, ?, ?)").run(chatId, fireMs, text).lastInsertRowid;
+addCol('reminders', 'plan_id', 'INTEGER');
+
+const saveReminder         = (chatId, fireMs, text, planId = null) => db.prepare("INSERT INTO reminders (chat_id, fire_ms, text, plan_id) VALUES (?, ?, ?, ?)").run(chatId, fireMs, text, planId).lastInsertRowid;
 const getPendingReminders  = () => db.prepare("SELECT * FROM reminders WHERE fired=0 AND fire_ms > ? ORDER BY fire_ms ASC").all(Date.now());
 const markReminderFired    = (id) => db.prepare("UPDATE reminders SET fired=1 WHERE id=?").run(id);
 const cleanOldReminders    = () => db.prepare("DELETE FROM reminders WHERE fire_ms < ?").run(Date.now() - 7 * 24 * 3600 * 1000);
+const getReminderByTime    = (chatId, fireMs) => db.prepare("SELECT id FROM reminders WHERE chat_id=? AND fire_ms=? AND fired=0 LIMIT 1").get(chatId, fireMs);
+function cancelPlanReminders(chatId, planId) {
+  const rows = db.prepare('SELECT id, fire_ms FROM reminders WHERE chat_id=? AND plan_id=? AND fired=0').all(chatId, planId);
+  for (const r of rows) {
+    db.prepare('UPDATE reminders SET fired=1 WHERE id=?').run(r.id);
+    try { require('./cron').cancelOnce(chatId, r.fire_ms); } catch {}
+  }
+}
+function deleteUnfiredReminders(chatId) {
+  const rows = db.prepare('SELECT id, fire_ms FROM reminders WHERE chat_id=? AND fired=0').all(chatId);
+  db.prepare('UPDATE reminders SET fired=1 WHERE chat_id=? AND fired=0').run(chatId);
+  try { require('./cron').cancelAllForChat(chatId); } catch {}
+  return rows;
+}
 
 // ── Known foods — per user ────────────────────────────────────────────────────
 
@@ -382,12 +431,14 @@ const getKnownExercises = (chatId) => db.prepare('SELECT * FROM known_exercises 
 // ── SQLite meal log ───────────────────────────────────────────────────────────
 
 function saveMealLog(chatId, data, dayStart) {
-  return db.prepare(`INSERT INTO meal_log (chat_id,meal_name,meal_type,calories,protein,carbs,fat,caffeine_mg,items_json,logged_at,day_start,retro_date)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+  const id = db.prepare(`INSERT INTO meal_log (chat_id,meal_name,meal_type,calories,protein,carbs,fat,caffeine_mg,items_json,logged_at,day_start,retro_date,meal_time)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(chatId, data.meal_name, data.meal_type ?? 'Meal',
       data.totals?.calories ?? 0, data.totals?.protein ?? 0, data.totals?.carbs ?? 0, data.totals?.fat ?? 0,
-      data.caffeine_mg ?? 0, JSON.stringify(data.items ?? []), Date.now(), dayStart ?? null, data.date ?? null
+      data.caffeine_mg ?? 0, JSON.stringify(data.items ?? []), Date.now(), dayStart ?? null, data.date ?? null,
+      data.time ?? null
     ).lastInsertRowid;
+  return id;
 }
 
 function getDayDataFromSQLite(chatId, dayStart) {
@@ -395,6 +446,7 @@ function getDayDataFromSQLite(chatId, dayStart) {
   const dayEnd = dayStart + 24 * 3600 * 1000;
   const meals = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND day_start=?').all(chatId, dayStart);
   const workouts = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND day_start=?').all(chatId, dayStart);
+  const recoveries = db.prepare('SELECT * FROM recovery_log WHERE chat_id=? AND day_start=?').all(chatId, dayStart);
   const totals = meals.reduce((acc, m) => ({
     calories: acc.calories + (m.calories ?? 0),
     protein:  acc.protein  + (m.protein  ?? 0),
@@ -402,11 +454,14 @@ function getDayDataFromSQLite(chatId, dayStart) {
     fat:      acc.fat      + (m.fat      ?? 0),
     caffeine: acc.caffeine + (m.caffeine_mg ?? 0),
   }), { calories: 0, protein: 0, carbs: 0, fat: 0, caffeine: 0 });
+  // Last sleep entry that ended within this day window (wake_time falls in [dayStart, dayEnd])
+  const lastSleep = db.prepare('SELECT * FROM sleep_log WHERE chat_id=? AND wake_time>=? AND wake_time<? ORDER BY wake_time DESC LIMIT 1').get(chatId, dayStart, dayEnd);
   return {
     totals: { calories: Math.round(totals.calories), protein: Math.round(totals.protein), carbs: Math.round(totals.carbs), fat: Math.round(totals.fat), caffeine: Math.round(totals.caffeine) },
     meals:    meals.map(m => ({ name: m.meal_name, type: m.meal_type, calories: Math.round(m.calories), protein: Math.round(m.protein), carbs: Math.round(m.carbs), fat: Math.round(m.fat) })),
     workouts: workouts.map(w => ({ name: w.workout_name, duration_min: w.duration_min, calories_burned: w.calories_burned })),
-    recovery: [],
+    sleep:    lastSleep ? { hours_slept: lastSleep.hours_slept, quality: lastSleep.quality, type: lastSleep.type ?? 'Night' } : null,
+    recovery: recoveries.map(r => ({ type: r.type, rounds: r.rounds, duration_per_round_min: r.duration_per_round_min, total_duration_min: r.total_duration_min, temperature_c: r.temperature_c, protocol: r.protocol ?? 'single', protocol_id: r.protocol_id, sequence_order: r.sequence_order })),
   };
 }
 
@@ -421,10 +476,11 @@ function getDailyMealTotalsFromSQLite(chatId, dayStart) {
 }
 
 function saveWorkoutLog(chatId, data, dayStart) {
-  return db.prepare(`INSERT INTO workout_log (chat_id,workout_name,activity_type,duration_min,calories_burned,exercises_json,logged_at,day_start,retro_date)
-    VALUES (?,?,?,?,?,?,?,?,?)`)
+  return db.prepare(`INSERT INTO workout_log (chat_id,workout_name,activity_type,duration_min,calories_burned,exercises_json,logged_at,day_start,retro_date,workout_time)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`)
     .run(chatId, data.workout_name, data.activity_type, data.duration_min, data.calories_burned,
-      JSON.stringify(data.exercises ?? []), Date.now(), dayStart ?? null, data.date ?? null
+      JSON.stringify(data.exercises ?? []), Date.now(), dayStart ?? null, data.date ?? null,
+      data.time ?? null
     ).lastInsertRowid;
 }
 
@@ -443,10 +499,13 @@ function deleteTodayEntry(entry) {
 }
 
 function getWeekDataFromSQLite(chatId, sinceMs) {
-  const OFFSET = 8 * 3600 * 1000;
-  const meals    = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
-  const workouts = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
-  const sleeps   = db.prepare('SELECT hours_slept FROM sleep_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
+  const { getOffsetMs } = require('./utils/time');
+  const tz     = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone || 'Asia/Kuala_Lumpur';
+  const OFFSET = getOffsetMs(tz);
+  const meals      = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
+  const workouts   = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
+  const sleeps     = db.prepare('SELECT hours_slept, quality, type FROM sleep_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
+  const recoveries = db.prepare('SELECT type, rounds, duration_per_round_min, total_duration_min, temperature_c, protocol, protocol_id, sequence_order, round_number, logged_at FROM recovery_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
 
   const dailyTotals = {};
   for (const m of meals) {
@@ -463,21 +522,37 @@ function getWeekDataFromSQLite(chatId, sinceMs) {
   }
 
   const trainDaySet = new Set(workouts.map(w => new Date((w.day_start || w.logged_at) + OFFSET).toISOString().split('T')[0]));
-  const avgSleep = sleeps.length ? Math.round(sleeps.reduce((s, r) => s + (r.hours_slept || 0), 0) / sleeps.length * 10) / 10 : null;
+  const nightSleeps = sleeps.filter(s => (s.type ?? 'Night') === 'Night');
+  const avgSleep = nightSleeps.length ? Math.round(nightSleeps.reduce((s, r) => s + (r.hours_slept || 0), 0) / nightSleeps.length * 10) / 10 : null;
+  const avgSleepQuality = nightSleeps.length ? Math.round(nightSleeps.reduce((s, r) => s + (r.quality || 3), 0) / nightSleeps.length * 10) / 10 : null;
+  const recoverySessions = recoveries.map(r => ({ date: new Date(r.logged_at + OFFSET).toISOString().split('T')[0], type: r.type, rounds: r.rounds, duration_per_round_min: r.duration_per_round_min, total_duration_min: r.total_duration_min, temperature_c: r.temperature_c, protocol: r.protocol, protocol_id: r.protocol_id, sequence_order: r.sequence_order, round_number: r.round_number }));
 
-  return { dailyTotals, trainDays: trainDaySet.size, avgSleep };
+  const bodyLogs = db.prepare('SELECT weight_kg, body_fat_pct, muscle_mass_kg, logged_at FROM body_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
+  const latestBody = bodyLogs.length ? bodyLogs[bodyLogs.length - 1] : null;
+
+  return { dailyTotals, trainDays: trainDaySet.size, workouts, avgSleep, avgSleepQuality, recoverySessions, bodyLogs, latestBody };
 }
 
 function getRecentWorkouts(chatId, days = 30) {
   const sinceMs = Date.now() - days * 24 * 3600 * 1000;
-  return db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at DESC LIMIT 20')
+  return db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at DESC')
     .all(chatId, sinceMs)
     .map(w => ({ ...w, exercises: JSON.parse(w.exercises_json || '[]') }));
 }
 
-function saveSleepLog(chatId, { bed_time, wake_time, hours_slept, quality, notes }) {
-  return db.prepare(`INSERT INTO sleep_log (chat_id,bed_time,wake_time,hours_slept,quality,notes,logged_at) VALUES (?,?,?,?,?,?,?)`)
-    .run(chatId, bed_time ?? null, wake_time ?? null, hours_slept ?? null, quality ?? null, notes ?? '', Date.now()).lastInsertRowid;
+function saveRecoveryLog(chatId, data, dayStart) {
+  return db.prepare(`INSERT INTO recovery_log (chat_id,type,rounds,duration_per_round_min,total_duration_min,temperature_c,notes,protocol,protocol_id,sequence_order,round_number,logged_at,day_start)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(chatId, data.type, data.rounds ?? 1, data.duration_per_round_min ?? null, data.total_duration_min ?? null, data.temperature_c ?? null, data.notes ?? '', data.protocol ?? 'single', data.protocol_id ?? null, data.sequence_order ?? 1, data.round_number ?? null, Date.now(), dayStart ?? null).lastInsertRowid;
+}
+
+function saveSleepLog(chatId, { bed_time, wake_time, hours_slept, quality, notes, type }) {
+  return db.prepare(`INSERT INTO sleep_log (chat_id,bed_time,wake_time,hours_slept,quality,notes,type,logged_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .run(chatId, bed_time ?? null, wake_time ?? null, hours_slept ?? null, quality ?? null, notes ?? '', type ?? 'Night', Date.now()).lastInsertRowid;
+}
+
+function getLastSleepLog(chatId) {
+  return db.prepare('SELECT bed_time, wake_time, hours_slept, quality FROM sleep_log WHERE chat_id=? ORDER BY id DESC LIMIT 1').get(chatId) || null;
 }
 
 // ── Chat history ──────────────────────────────────────────────────────────────
@@ -489,35 +564,166 @@ function saveHistory(chatId, role, text) {
 
 const getHistory = (chatId, n = 10) => db.prepare('SELECT role, text FROM chat_history WHERE chat_id=? ORDER BY id DESC LIMIT ?').all(chatId, n).reverse();
 
-// ── Golf messages ─────────────────────────────────────────────────────────────
 
-const saveGolfMessage      = (chatId, role, content) => db.prepare("INSERT INTO golf_messages (chat_id,role,content,timestamp) VALUES (?,?,?,datetime('now'))").run(chatId, role, content);
-const getGolfHistory       = (chatId, limit = 10)    => db.prepare('SELECT * FROM golf_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?').all(chatId, limit).reverse();
-const getGolfMessageCount  = (chatId)                => db.prepare('SELECT COUNT(*) as c FROM golf_messages WHERE chat_id=?').get(chatId).c;
-const deleteOldGolfMessages = (chatId, n)            => db.prepare('DELETE FROM golf_messages WHERE chat_id=? AND id IN (SELECT id FROM golf_messages WHERE chat_id=? ORDER BY id ASC LIMIT ?)').run(chatId, chatId, n);
-const clearGolfHistory     = (chatId)                => db.prepare('DELETE FROM golf_messages WHERE chat_id=?').run(chatId);
+function getRecentLogs(chatId, days = 7) {
+  const since = Date.now() - days * 86400000;
+  const meals    = db.prepare("SELECT id, meal_name as name, 'meal' as type, logged_at FROM meal_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at DESC").all(chatId, since);
+  const workouts = db.prepare("SELECT id, workout_name as name, 'workout' as type, logged_at FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at DESC").all(chatId, since);
+  return [...meals, ...workouts].sort((a, b) => b.logged_at - a.logged_at);
+}
 
-function replaceGolfHistory(chatId, messages) {
-  clearGolfHistory(chatId);
-  for (const m of messages) db.prepare("INSERT INTO golf_messages (chat_id,role,content,timestamp) VALUES (?,?,?,datetime('now'))").run(chatId, m.role, m.content);
+function getLogById(chatId, type, id) {
+  const col = type === 'meal' ? 'meal_name' : 'workout_name';
+  return db.prepare(`SELECT id, ${col} as name, ? as type FROM ${type}_log WHERE chat_id=? AND id=?`).get(type, chatId, id) || null;
+}
+
+function getLastLogEntry(chatId, dayStart) {
+  const meal    = db.prepare('SELECT id, meal_name as name, "meal" as type, logged_at FROM meal_log WHERE chat_id=? AND day_start=? ORDER BY logged_at DESC LIMIT 1').get(chatId, dayStart);
+  const workout = db.prepare('SELECT id, workout_name as name, "workout" as type, logged_at FROM workout_log WHERE chat_id=? AND day_start=? ORDER BY logged_at DESC LIMIT 1').get(chatId, dayStart);
+  if (!meal && !workout) return null;
+  if (!meal) return workout;
+  if (!workout) return meal;
+  return meal.logged_at >= workout.logged_at ? meal : workout;
+}
+
+function getLogByName(chatId, name) {
+  // Strip emoji and non-alphanumeric prefix/noise for matching
+  const clean = (s) => s.replace(/[\u{1F000}-\u{1FFFF}\u{2600}-\u{27FF}]/gu, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const lc = clean(name);
+  const meal = db.prepare("SELECT id, meal_name as name, 'meal' as type FROM meal_log WHERE chat_id=? AND lower(meal_name)=? ORDER BY logged_at DESC LIMIT 1").get(chatId, lc);
+  if (meal) return meal;
+  const workout = db.prepare("SELECT id, workout_name as name, 'workout' as type FROM workout_log WHERE chat_id=? AND lower(workout_name)=? ORDER BY logged_at DESC LIMIT 1").get(chatId, lc);
+  if (workout) return workout;
+  const mealFuzzy = db.prepare("SELECT id, meal_name as name, 'meal' as type FROM meal_log WHERE chat_id=? AND lower(meal_name) LIKE ? ORDER BY logged_at DESC LIMIT 1").get(chatId, `%${lc}%`);
+  if (mealFuzzy) return mealFuzzy;
+  const workFuzzy = db.prepare("SELECT id, workout_name as name, 'workout' as type FROM workout_log WHERE chat_id=? AND lower(workout_name) LIKE ? ORDER BY logged_at DESC LIMIT 1").get(chatId, `%${lc}%`);
+  return workFuzzy || null;
+}
+
+function setLogBotMessageId(table, rowId, botMsgId) {
+  db.prepare(`UPDATE ${table} SET bot_message_id=? WHERE id=?`).run(botMsgId, rowId);
+}
+
+function getLogByBotMessageId(chatId, botMsgId) {
+  const meal = db.prepare('SELECT id, meal_name as name, "meal" as type FROM meal_log WHERE chat_id=? AND bot_message_id=?').get(chatId, botMsgId);
+  if (meal) return meal;
+  const workout = db.prepare('SELECT id, workout_name as name, "workout" as type FROM workout_log WHERE chat_id=? AND bot_message_id=?').get(chatId, botMsgId);
+  return workout || null;
+}
+
+function renameLog(type, rowId, newName) {
+  const col = type === 'meal' ? 'meal_name' : 'workout_name';
+  db.prepare(`UPDATE ${type}_log SET ${col}=? WHERE id=?`).run(newName, rowId);
+}
+
+function updateLogTime(type, rowId, timeStr) {
+  const col = type === 'meal' ? 'meal_time' : 'workout_time';
+  db.prepare(`UPDATE ${type}_log SET ${col}=? WHERE id=?`).run(timeStr, rowId);
+}
+
+function getEntriesForDay(chatId, type, dayStart) {
+  if (type === 'meal') {
+    return db.prepare('SELECT id, meal_name as title FROM meal_log WHERE chat_id=? AND day_start=? ORDER BY logged_at ASC').all(chatId, dayStart);
+  }
+  if (type === 'workout') {
+    return db.prepare('SELECT id, workout_name as title FROM workout_log WHERE chat_id=? AND day_start=? ORDER BY logged_at ASC').all(chatId, dayStart);
+  }
+  if (type === 'sleep') {
+    return db.prepare('SELECT id, hours_slept as title FROM sleep_log WHERE chat_id=? AND logged_at > ? ORDER BY logged_at ASC').all(chatId, dayStart);
+  }
+  return [];
+}
+
+// ── Body measurements ─────────────────────────────────────────────────────────
+
+function saveBodyLog(chatId, data) {
+  const bmi = data.weight_kg && data.height_cm
+    ? +(data.weight_kg / ((data.height_cm / 100) ** 2)).toFixed(1)
+    : data.bmi ?? null;
+  return db.prepare(`INSERT INTO body_log (chat_id,weight_kg,body_fat_pct,muscle_mass_kg,bmi,notes,logged_at) VALUES (?,?,?,?,?,?,?)`)
+    .run(chatId, data.weight_kg ?? null, data.body_fat_pct ?? null, data.muscle_mass_kg ?? null, bmi, data.notes ?? null, Date.now()).lastInsertRowid;
+}
+
+function getLastBodyMeasurement(chatId) {
+  return db.prepare('SELECT * FROM body_log WHERE chat_id=? ORDER BY logged_at DESC LIMIT 1').get(chatId) ?? null;
+}
+
+function getAllBodyMeasurements(chatId) {
+  return db.prepare('SELECT * FROM body_log WHERE chat_id=? ORDER BY logged_at ASC').all(chatId)
+    .map(r => ({ date: new Date(r.logged_at).toISOString().split('T')[0], weight_kg: r.weight_kg, body_fat_pct: r.body_fat_pct, bmi: r.bmi }));
+}
+
+// ── Historical data (replaces Notion getHistoricalData) ───────────────────────
+
+function getHistoricalDataFromSQLite(chatId) {
+  const meals      = db.prepare('SELECT * FROM meal_log WHERE chat_id=? ORDER BY logged_at ASC').all(chatId);
+  const workouts   = db.prepare('SELECT * FROM workout_log WHERE chat_id=? ORDER BY logged_at ASC').all(chatId);
+  const sleeps     = db.prepare('SELECT * FROM sleep_log WHERE chat_id=? ORDER BY logged_at ASC').all(chatId);
+  const recoveries = db.prepare('SELECT * FROM recovery_log WHERE chat_id=? ORDER BY logged_at ASC').all(chatId);
+
+  const { getOffsetMs } = require('./utils/time');
+  const tz     = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone || 'Asia/Kuala_Lumpur';
+  const OFFSET = getOffsetMs(tz);
+  const dailyTotals = {};
+  for (const m of meals) {
+    const key = new Date((m.day_start || m.logged_at) + OFFSET).toISOString().split('T')[0];
+    if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0, meals: [] };
+    dailyTotals[key].calories += m.calories ?? 0;
+    dailyTotals[key].protein  += m.protein  ?? 0;
+    dailyTotals[key].carbs    += m.carbs    ?? 0;
+    dailyTotals[key].fat      += m.fat      ?? 0;
+    if (m.meal_name) dailyTotals[key].meals.push(m.meal_name);
+  }
+  for (const d of Object.values(dailyTotals)) {
+    d.calories = Math.round(d.calories); d.protein = Math.round(d.protein); d.carbs = Math.round(d.carbs); d.fat = Math.round(d.fat);
+  }
+
+  return {
+    dailyTotals,
+    workouts:  workouts.map(w => ({ date: new Date((w.day_start || w.logged_at) + OFFSET).toISOString().split('T')[0], name: w.workout_name, duration: w.duration_min })),
+    sleep:     sleeps.map(s => ({ date: new Date(s.logged_at + OFFSET).toISOString().split('T')[0], hours: s.hours_slept, quality: s.quality, type: s.type ?? 'Night' })),
+    recovery:  recoveries.map(r => ({ date: new Date(r.logged_at + OFFSET).toISOString().split('T')[0], type: r.type, rounds: r.rounds, total_duration_min: r.total_duration_min, temperature_c: r.temperature_c })),
+  };
+}
+
+// ── Coach conversations + user profile ────────────────────────────────────────
+
+function saveCoachConversation(chatId, messages, summary) {
+  return db.prepare('INSERT INTO coach_conversations (chat_id, messages_json, summary, closed_at) VALUES (?, ?, ?, ?)')
+    .run(chatId, JSON.stringify(messages), summary, Date.now()).lastInsertRowid;
+}
+
+function getRecentConversationSummaries(chatId, limit = 5) {
+  return db.prepare('SELECT summary, closed_at FROM coach_conversations WHERE chat_id=? ORDER BY closed_at DESC LIMIT ?')
+    .all(chatId, limit);
+}
+
+function getUserProfile(chatId) {
+  return db.prepare('SELECT user_profile FROM user_state WHERE chat_id=?').get(chatId)?.user_profile || '';
+}
+
+function setUserProfile(chatId, profile) {
+  setState(chatId, { user_profile: profile });
 }
 
 module.exports = {
   getState, setState, addCaffeine, resetCaffeine, getAllChatIds,
-  savePlan, getPlansByDate, getPendingUntimed, getPendingTimed,
+  savePlan, getPendingUntimed, getPendingTimed,
   getPlanByNotionId, getPlanByTitleDate,
-  updatePlanStatus, markPlanReminded, setPlanNotionId, setPlanCalendar, setPlanGCalId,
+  updatePlanStatus, setPlanNotionId, setPlanCalendar, setPlanGCalId,
   getLastPending, getAllPending,
   saveCoachMessage, getReplyChain, countExchanges, clearReplyChain,
-  logMessage, getRecentMessages, wasRecentlyActive,
-  saveReminder, getPendingReminders, markReminderFired, cleanOldReminders,
+  logMessage, wasRecentlyActive,
+  saveReminder, getPendingReminders, markReminderFired, cleanOldReminders, getReminderByTime, cancelPlanReminders, deleteUnfiredReminders,
   saveHistory, getHistory,
-  saveGolfMessage, getGolfHistory, getGolfMessageCount,
-  deleteOldGolfMessages, clearGolfHistory, replaceGolfHistory,
-  upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKnownFoods,
+upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKnownFoods,
   upsertKnownExercise, getKnownExercises,
   getTargetsFromDb, setTargetsInDb,
   saveMealLog, getDayDataFromSQLite, getDailyMealTotalsFromSQLite,
-  saveWorkoutLog, getRecentWorkouts, saveSleepLog,
+  saveWorkoutLog, getRecentWorkouts, saveRecoveryLog, saveSleepLog, getLastSleepLog,
   getTodayEntriesFromSQLite, deleteTodayEntry, getWeekDataFromSQLite,
+  setLogBotMessageId, getLogByBotMessageId, renameLog, getLastLogEntry, getRecentLogs,
+  saveBodyLog, getLastBodyMeasurement, getAllBodyMeasurements, getHistoricalDataFromSQLite,
+  updateLogTime, getEntriesForDay,
+  saveCoachConversation, getRecentConversationSummaries, getUserProfile, setUserProfile,
 };

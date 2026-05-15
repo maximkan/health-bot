@@ -1,11 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const { getOffsetMs } = require('./time');
 
 const CONFIG_FILE = path.join(__dirname, '../../data/week-config.json');
 
-function getISOWeek() {
-  // Use Malaysia time (UTC+8)
-  const now = new Date(Date.now() + 8 * 60 * 60 * 1000);
+function getISOWeek(tz = 'Asia/Kuala_Lumpur') {
+  const now = new Date(Date.now() + getOffsetMs(tz));
   const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const day = d.getUTCDay() || 7;
   d.setUTCDate(d.getUTCDate() + 4 - day);
@@ -13,8 +13,8 @@ function getISOWeek() {
   return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
 }
 
-function getCurrentWeekType() {
-  const isoWeek = getISOWeek();
+function getCurrentWeekType(tz = 'Asia/Kuala_Lumpur') {
+  const isoWeek = getISOWeek(tz);
   const natural = isoWeek % 2 === 1 ? 'odd' : 'even';
   if (!fs.existsSync(CONFIG_FILE)) return natural;
   try {
@@ -25,8 +25,8 @@ function getCurrentWeekType() {
   }
 }
 
-function setWeekType(type) {
-  const isoWeek = getISOWeek();
+function setWeekType(type, tz = 'Asia/Kuala_Lumpur') {
+  const isoWeek = getISOWeek(tz);
   const natural = isoWeek % 2 === 1 ? 'odd' : 'even';
   fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
   fs.writeFileSync(CONFIG_FILE, JSON.stringify({ flip: natural !== type }));
