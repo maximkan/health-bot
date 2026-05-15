@@ -502,7 +502,7 @@ function getWeekDataFromSQLite(chatId, sinceMs) {
   const OFFSET = getOffsetMs(tz);
   const meals      = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
   const workouts   = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
-  const sleeps     = db.prepare('SELECT hours_slept, quality, type FROM sleep_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
+  const sleeps     = db.prepare('SELECT hours_slept, quality, type, wake_time, logged_at FROM sleep_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
   const recoveries = db.prepare('SELECT type, rounds, duration_per_round_min, total_duration_min, temperature_c, protocol, protocol_id, sequence_order, round_number, logged_at FROM recovery_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
 
   const dailyTotals = {};
@@ -517,6 +517,26 @@ function getWeekDataFromSQLite(chatId, sinceMs) {
   for (const k of Object.keys(dailyTotals)) {
     const d = dailyTotals[k];
     dailyTotals[k] = { calories: Math.round(d.calories), protein: Math.round(d.protein), carbs: Math.round(d.carbs), fat: Math.round(d.fat) };
+  }
+
+  for (const w of workouts) {
+    const key = new Date((w.day_start || w.logged_at) + OFFSET).toISOString().split('T')[0];
+    if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    dailyTotals[key].trained = true;
+  }
+  for (const s of sleeps) {
+    if ((s.type ?? 'Night') !== 'Night') continue;
+    const wakeMs = s.wake_time || s.logged_at;
+    if (!wakeMs) continue;
+    const key = new Date(wakeMs + OFFSET).toISOString().split('T')[0];
+    if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    dailyTotals[key].sleep_h = s.hours_slept;
+    dailyTotals[key].sleep_q = s.quality;
+  }
+  for (const r of recoveries) {
+    const key = new Date(r.logged_at + OFFSET).toISOString().split('T')[0];
+    if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+    dailyTotals[key].recovery = true;
   }
 
   const trainDaySet = new Set(workouts.map(w => new Date((w.day_start || w.logged_at) + OFFSET).toISOString().split('T')[0]));

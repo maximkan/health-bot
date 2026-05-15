@@ -183,7 +183,12 @@ async function runProactiveForUser(chatId, timeLabel) {
     const mondayStr = mondayUTC.toISOString().split('T')[0];
     const weekStartMs = getDateAt(mondayStr, 0, 0, getOffsetMs(tz));
     const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
-    const recentWeek = weekData?.dailyTotals ?? null;
+    const recentWeek = weekData ? {
+      dailyTotals:    weekData.dailyTotals,
+      trainDays:      weekData.trainDays,
+      avgSleep:       weekData.avgSleep,
+      avgSleepQuality: weekData.avgSleepQuality,
+    } : null;
 
     const recentAlerts = db.getHistory(chatId, 30)
       .filter(m => m.role === 'assistant')
