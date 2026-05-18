@@ -224,6 +224,7 @@ TIMED INTERVALS: "4×30s" or "4 sets of 30 seconds":
 - Use "duration_sec": 30, "sets": 4 — omit reps entirely
 - For distance-based cardio ("250m rowing"): use "distance_m": 250 — omit reps
 - These still get a "round" field if part of a round
+- DURATION: always add interval round time on top of stated circuit time. Calculate: sets × (work_sec + rest_sec) / 60 per exercise, sum all interval exercises. Example: Round 4 has 4×30s rowing (30s rest) + 4×30s ski erg (30s rest) → 4×60/60 + 4×60/60 = 4+4 = 8 min extra. If user said "12 min for rounds 1-3", total duration_min = 12 + 8 = 20.
 
 If duration is not stated, ESTIMATE from exercises:
 - Count total_sets across all exercises
