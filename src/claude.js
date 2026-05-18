@@ -51,6 +51,8 @@ Return ALL intents that apply. Examples:
 "started my workout" → ["WORKOUT_START"]
 "at the gym" → ["WORKOUT_START"]
 "gym tomorrow at 10am" → ["PLAN"]
+"cancel" → ["GENERAL"]
+"nevermind" → ["GENERAL"]
 "change my lunch to 2pm" → ["CORRECTION"]
 "maybe we should adjust my targets" → ["COACH_QUESTION"]
 "i keep going over calories, can you suggest new targets?" → ["COACH_QUESTION"]
@@ -102,7 +104,7 @@ async function matchPlanToModify(userText, plans) {
     messages: [{ role: 'user', content: `Message: "${userText}"\n\nPlans:\n${list}` }],
   });
   const n = parseInt(response.content[0].text.trim());
-  return (n >= 1 && n <= plans.length) ? plans[n - 1] : plans[plans.length - 1];
+  return (n >= 1 && n <= plans.length) ? plans[n - 1] : null;
 }
 
 // ── Entry matching for deletion ───────────────────────────────────────────────

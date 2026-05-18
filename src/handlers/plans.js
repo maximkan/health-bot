@@ -134,6 +134,7 @@ async function handlePlanSkip(bot, msg) {
     const pending = db.getAllPending(chatId);
     if (!pending.length) { await bot.sendMessage(chatId, 'No pending plans.'); return; }
     const plan = await claude.matchPlanToModify(msg.text, pending);
+    if (!plan) { await bot.sendMessage(chatId, 'which plan?'); return; }
     db.updatePlanStatus(plan.id, 'skipped');
     if (plan.gcal_event_id) {
       await gcal.deleteEvent(chatId, plan.gcal_event_id).catch(() => {});
