@@ -202,40 +202,61 @@ function buildWorkoutSystem(weight_kg) {
   if (!weight_kg) throw new Error('buildWorkoutSystem called without weight_kg');
   return `Parse the user's workout. The message may contain multiple logs (food, plans, etc) — extract ONLY the workout/exercise part.
 
-Calories = MET × ${weight_kg}kg × hours. MET values for cardio/sport:
-- Rowing machine: 7.0, Running 8km/h: 8.0, Swimming: 7.0, Tennis: 7.3, Golf walking: 4.3, Yoga: 2.5, Hiking: 6.0
+Calories = MET × ${weight_kg}kg × hours. MET values:
+- Running: 8.5, Rowing machine: 7.5, Cycling: 6.8, Swimming: 6.0, Tennis: 7.3, Golf walking: 4.3, Yoga: 2.5, Hiking: 6.0
+- Circuit training (sustained, moving between exercises, any duration): MET 8.0 → activity_type: "circuit"
+- HIIT (near-maximal intervals, short sessions <30 min): MET 10.0 → activity_type: "hiit"
 
 For weight training, use density to pick MET (density = total_sets / duration_min):
-- density > 0.4 (many exercises, short rest — circuit/superset style): MET 5.5
+- density > 0.4 (many exercises, short rest — superset style): MET 5.5
 - density 0.25–0.4 (normal gym pace, moderate rest): MET 4.5
 - density < 0.25 (long rests, heavy compound focus): MET 3.5
 Example: 8 exercises × 3 sets = 24 sets in 40 min → density 0.60 → MET 5.5 → 5.5 × ${weight_kg} × (40/60) = ~${Math.round(5.5 * weight_kg * 40 / 60)} kcal
 
-If duration is not stated, ESTIMATE it from the exercises:
+CIRCUIT ROUNDS: If the workout lists exercises under labeled rounds (Round 1, Round 2, etc.):
+- Keep each exercise per round as a SEPARATE entry — do NOT collapse rounds or sum reps across rounds
+- Each entry gets "round": <round_number>, "sets": 1, "reps": as stated for that round
+- activity_type MUST be "circuit"
+- duration_min = total stated time for all rounds (including any interval rounds)
+- For rounds with different reps, each round is its own entry with its own reps value
+
+TIMED INTERVALS: "4×30s" or "4 sets of 30 seconds":
+- Use "duration_sec": 30, "sets": 4 — omit reps entirely
+- For distance-based cardio ("250m rowing"): use "distance_m": 250 — omit reps
+- These still get a "round" field if part of a round
+
+If duration is not stated, ESTIMATE from exercises:
 - Count total_sets across all exercises
-- Assume ~2.5 min per set (work time + rest) for strength; ~1.5 min per set for lighter/cardio exercises
+- ~2.5 min per set for strength; ~1.5 min per set for lighter/cardio
 - duration_min = total_sets × 2.5 (round to nearest 5)
-- Then compute density and calories_burned as normal — never leave them null when exercises are present
+- Never leave calories_burned null when exercises are present
 
 SETS/REPS RULES:
-- "3x10" or "3 sets x 10 reps" → sets=3, reps=10
-- "60 deadlifts" (total reps, no sets) → sets=1, reps=60
-- "30 each leg" means that side's count; total reps = stated number (e.g. "60 bulgarian squats (30 each leg)" → sets=1, reps=60)
-- Always populate both sets AND reps. Never leave both null.
+- "3x10" → sets=3, reps=10
+- "60 deadlifts" (no sets) → sets=1, reps=60
+- "30 each leg" → reps=30 (the stated per-side number)
+- For timed/distance exercises, omit reps — use duration_sec or distance_m instead
 
-If Known Custom Exercises are provided, use their typical values as defaults when the user doesn't specify sets/reps/weight.
+If Known Custom Exercises are provided, use their typical values as defaults.
 
-Time parsing: extract the START time of the workout if mentioned in any format ("8am", "8:00", "8 to 10am" → "08:00", "from 9" → "09:00"). Use 24h "HH:MM" format. Omit if no time mentioned.
+Time parsing: extract START time if mentioned ("8am" → "08:00", "8 to 10am" → "08:00"). 24h format. Omit if none.
 
 Return ONLY JSON:
 {
-  "workout_name": "Legs Day",
-  "activity_type": "legs",
-  "duration_min": 45,
-  "calories_burned": 280,
+  "workout_name": "Upper Body Circuit",
+  "activity_type": "circuit",
+  "duration_min": 16,
+  "calories_burned": 216,
   "time": "08:00",
-  "exercises": [{"name": "Squats", "sets": 4, "reps": 10, "weight_kg": 60}],
-  "exercises_summary": "squats 4x10@60kg, lunges 3x12"
+  "exercises": [
+    {"name": "Dumbbell Rows", "round": 1, "sets": 1, "reps": 10, "weight_kg": 15},
+    {"name": "Rowing Machine", "round": 1, "distance_m": 250},
+    {"name": "Dumbbell Rows", "round": 2, "sets": 1, "reps": 10, "weight_kg": 15},
+    {"name": "Rowing Machine", "round": 2, "distance_m": 250},
+    {"name": "Rowing Intervals", "round": 4, "sets": 4, "duration_sec": 30},
+    {"name": "Ski Erg", "round": 4, "sets": 4, "duration_sec": 30}
+  ],
+  "exercises_summary": "3 rounds: rows 10@15kg, shoulder press 10@7.5kg... + round 4 intervals"
 }`;
 }
 

@@ -168,11 +168,12 @@ function computeWorkoutCalories(chatId, data) {
   const actType = (data.activity_type ?? '').toLowerCase();
 
   // Cardio: fixed MET per type
-  if (actType.includes('run') || actType.includes('jog'))    return Math.round(8.0 * weight * (dur / 60));
+  if (actType.includes('run') || actType.includes('jog'))    return Math.round(8.5 * weight * (dur / 60));
   if (actType.includes('cycl') || actType.includes('bike'))  return Math.round(6.8 * weight * (dur / 60));
-  if (actType.includes('row'))                                return Math.round(7.0 * weight * (dur / 60));
+  if (actType.includes('row'))                                return Math.round(7.5 * weight * (dur / 60));
   if (actType.includes('swim'))                               return Math.round(6.0 * weight * (dur / 60));
-  if (actType.includes('hiit') || actType.includes('circuit')) return Math.round(8.0 * weight * (dur / 60));
+  if (actType.includes('hiit'))                               return Math.round(10.0 * weight * (dur / 60));
+  if (actType.includes('circuit'))                            return Math.round(8.0 * weight * (dur / 60));
   if (actType.includes('walk'))                               return Math.round(3.5 * weight * (dur / 60));
 
   // Strength / default: density-based MET
@@ -196,6 +197,12 @@ function formatExerciseLine(e) {
     } else {
       s += ' ' + e.sets_detail.map(d => `${d.sets}×${d.reps}${d.weight_kg ? '@' + d.weight_kg + 'kg' : ''}`).join(' + ');
     }
+  } else if (e.duration_sec) {
+    s += ` ${e.sets ?? 1}×${e.duration_sec}s`;
+    if (e.weight_kg) s += ` @${e.weight_kg}kg`;
+  } else if (e.distance_m) {
+    const sets = e.sets ?? 1;
+    s += sets > 1 ? ` ${sets}×${e.distance_m}m` : ` ${e.distance_m}m`;
   } else {
     if (e.sets && e.reps) s += ` ${e.sets}×${e.reps}`;
     if (e.weight_kg) s += ` @${e.weight_kg}kg`;
@@ -209,7 +216,26 @@ function formatWorkoutPreview(data) {
   const retro = data.date ? ` (${data.date})` : '';
   const timeLabel = data.time ? ` @ ${data.time}` : '';
   const header = `💪 ${[data.workout_name + retro, dur, cal].filter(Boolean).join(' — ')}${timeLabel}`;
-  const exLines = (data.exercises || []).map(formatExerciseLine);
+
+  const exercises = data.exercises || [];
+  const hasRounds = exercises.some(e => e.round != null);
+  let exLines;
+  if (hasRounds) {
+    const byRound = new Map();
+    for (const e of exercises) {
+      const r = e.round ?? 1;
+      if (!byRound.has(r)) byRound.set(r, []);
+      byRound.get(r).push(e);
+    }
+    exLines = [];
+    for (const [round, exs] of [...byRound.entries()].sort((a, b) => a[0] - b[0])) {
+      exLines.push(`Round ${round}:`);
+      exLines.push(...exs.map(formatExerciseLine));
+    }
+  } else {
+    exLines = exercises.map(formatExerciseLine);
+  }
+
   const lines = [header, ...(exLines.length ? exLines : (data.exercises_summary ? [`  ${data.exercises_summary}`] : []))];
   lines.push('');
   lines.push('ok to log, or tell me what to fix');
