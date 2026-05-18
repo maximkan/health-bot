@@ -992,6 +992,17 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     const now = Date.now();
     const weekStartMs = now - 7 * 24 * 3600 * 1000;
     const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
+    // If the 7-day window missed the previous Monday weigh-in (timing edge case),
+    // fall back to the last 2 all-time measurements so weight delta is always computed
+    if ((weekData.bodyLogs?.length ?? 0) < 2) {
+      const allBody = db.getAllBodyMeasurements(chatId);
+      if (allBody.length >= 2) {
+        weekData.bodyLogs = allBody.slice(-2).map(b => ({
+          weight_kg: b.weight_kg, body_fat_pct: b.body_fat_pct,
+          muscle_mass_kg: b.muscle_mass_kg, logged_at: b.logged_at,
+        }));
+      }
+    }
     const targetsCtx = db.getTargetsText(chatId);
     const targets    = db.getTargets(chatId);
 
