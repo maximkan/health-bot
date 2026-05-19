@@ -317,14 +317,14 @@ async function parseLiveExercise(text) {
 
 // ── Workout comparison ────────────────────────────────────────────────────────
 
-async function generateWorkoutComparison(comparisonBlock, prevDate, userProfile = {}) {
+async function generateWorkoutComparison(comparisonBlock, userProfile = {}) {
   const exampleForStyle = WORKOUT_COMPARISON_EXAMPLES[userProfile.coaching_style] ?? WORKOUT_COMPARISON_EXAMPLES[2];
-  const prompt = `Write a brief workout progress comment using the pre-computed comparison below.
+  const prompt = `Write a brief workout progress comment using the pre-computed comparison below. Each exercise shows its own previous date and workout name inline.
 
 ${comparisonBlock}
 
 OUTPUT REQUIREMENTS:
-- Open with one line referencing the previous session date (${prevDate}). Match the opener tone to the verdict line: positive opener if mostly UP, neutral/honest opener if mostly FLAT or DOWN.
+- Open with 1 line matching the verdict tone: positive if mostly UP, honest if mostly FLAT or DOWN. You may naturally reference the previous dates shown inline.
 - Then 1–2 sentences naming specific exercises by their tag: which went UP, which went FLAT, which went DOWN. Use the numbers from the block as-is — do not recompute.
 - 2–3 sentences total. Casual, direct. No markdown.
 

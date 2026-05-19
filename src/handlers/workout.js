@@ -3,17 +3,21 @@ const db     = require('../db');
 const { calculateTDEE } = require('../utils/tdee');
 const { getOffsetMs, requireTimezone } = require('../utils/time');
 
-function buildWorkoutComparisonBlock(current, previous, prevDate) {
+// exerciseHistory: Map<normalizedName, {exercise, date, workoutName}>
+function buildWorkoutComparisonBlock(current, exerciseHistory) {
   const norm = s => String(s || '').trim().toLowerCase();
   const fmtSet = ex => {
     if (ex.sets_detail?.length) {
       return ex.sets_detail.map(d => {
         const w = d.weight_kg != null ? `${d.weight_kg}kg` : 'bw';
         return `${d.sets}×${d.reps}@${w}`;
-      }).join(', ');
+      }).join('+');
     }
     const w = ex.weight_kg != null ? `${ex.weight_kg}kg` : 'bw';
-    return `${ex.sets ?? '?'}×${ex.reps ?? '?'}@${w}`;
+    if (ex.sets && ex.reps) return `${ex.sets}×${ex.reps}@${w}`;
+    if (ex.distance_m) return `${ex.sets ?? 1}×${ex.distance_m}m`;
+    if (ex.duration_sec) return `${ex.sets ?? 1}×${ex.duration_sec}s`;
+    return w;
   };
   const topWeight = ex => {
     if (ex.sets_detail?.length) return Math.max(...ex.sets_detail.map(d => d.weight_kg ?? 0));
@@ -24,56 +28,45 @@ function buildWorkoutComparisonBlock(current, previous, prevDate) {
     return (ex.sets ?? 1) * (ex.reps ?? 0);
   };
 
-  const prevEx = (previous?.exercises ?? []);
-  const currEx = (current?.exercises ?? []);
-  const prevByName = new Map(prevEx.map(e => [norm(e.name), e]));
-  const currByName = new Map(currEx.map(e => [norm(e.name), e]));
+  // Aggregate current exercises by name (handles same exercise logged multiple times)
+  const currByName = new Map();
+  for (const ex of current.exercises ?? []) {
+    const key = norm(ex.name);
+    if (!currByName.has(key)) currByName.set(key, { name: ex.name, allSets: [] });
+    currByName.get(key).allSets.push(ex);
+  }
 
   const lines = [];
-  let upCount = 0, downCount = 0, flatCount = 0, newCount = 0, droppedCount = 0;
+  let upCount = 0, downCount = 0, flatCount = 0, newCount = 0;
 
-  for (const ex of currEx) {
-    const key = norm(ex.name);
-    const prev = prevByName.get(key);
-    if (!prev) {
-      lines.push(`- ${ex.name}: —  →  ${fmtSet(ex)}  [NEW]`);
+  for (const [key, { name, allSets }] of currByName.entries()) {
+    const hist = exerciseHistory.get(key);
+    const currFmt = allSets.length === 1 ? fmtSet(allSets[0]) : allSets.map(fmtSet).join(' + ');
+    const currTopW = Math.max(...allSets.map(topWeight));
+    const currTotalReps = allSets.reduce((s, e) => s + totalReps(e), 0);
+
+    if (!hist) {
+      lines.push(`- ${name}: —  →  ${currFmt}  [NEW]`);
       newCount++;
       continue;
     }
-    const prevTop = topWeight(prev);
-    const currTop = topWeight(ex);
-    const prevReps = totalReps(prev);
-    const currReps = totalReps(ex);
+
+    const prevTopW = topWeight(hist.exercise);
+    const prevTotalReps = totalReps(hist.exercise);
+    const prevFmt = fmtSet(hist.exercise);
 
     let tag;
-    if (currTop > prevTop)         { tag = `[UP +${(currTop - prevTop).toFixed(1)}kg top set]`; upCount++; }
-    else if (currTop < prevTop)    { tag = `[DOWN -${(prevTop - currTop).toFixed(1)}kg top set]`; downCount++; }
-    else if (currReps > prevReps)  { tag = `[UP +${currReps - prevReps} reps]`; upCount++; }
-    else if (currReps < prevReps)  { tag = `[DOWN -${prevReps - currReps} reps]`; downCount++; }
-    else                           { tag = `[FLAT]`; flatCount++; }
+    if (currTopW > prevTopW)               { tag = `[UP +${(currTopW - prevTopW).toFixed(1)}kg top set]`; upCount++; }
+    else if (currTopW < prevTopW)          { tag = `[DOWN -${(prevTopW - currTopW).toFixed(1)}kg top set]`; downCount++; }
+    else if (currTotalReps > prevTotalReps) { tag = `[UP +${currTotalReps - prevTotalReps} reps]`; upCount++; }
+    else if (currTotalReps < prevTotalReps) { tag = `[DOWN -${prevTotalReps - currTotalReps} reps]`; downCount++; }
+    else                                   { tag = `[FLAT]`; flatCount++; }
 
-    lines.push(`- ${ex.name}: ${fmtSet(prev)}  →  ${fmtSet(ex)}  ${tag}`);
+    lines.push(`- ${name}: ${prevFmt} (${hist.date}, ${hist.workoutName})  →  ${currFmt}  ${tag}`);
   }
 
-  for (const ex of prevEx) {
-    if (!currByName.has(norm(ex.name))) {
-      lines.push(`- ${ex.name}: ${fmtSet(ex)}  →  —  [SKIPPED]`);
-      droppedCount++;
-    }
-  }
-
-  const verdict = `Verdict: ${upCount} up, ${flatCount} flat, ${downCount} down, ${newCount} new, ${droppedCount} skipped.`;
-
-  return [
-    `Previous session date: ${prevDate}`,
-    `Previous workout name: ${previous?.workout_name ?? '(unknown)'}`,
-    `Current workout name: ${current?.workout_name ?? '(unknown)'}`,
-    '',
-    'Per-exercise comparison:',
-    ...lines,
-    '',
-    verdict,
-  ].join('\n');
+  const verdict = `Verdict: ${upCount} up, ${flatCount} flat, ${downCount} down, ${newCount} new.`;
+  return [`Per-exercise comparison (each vs most recent previous occurrence):`, ...lines, '', verdict].join('\n');
 }
 
 function buildStrengthSummaryBlock(workouts) {
@@ -298,23 +291,32 @@ async function checkWorkoutProgression(bot, chatId, currentWorkout) {
   const exercises = currentWorkout.exercises ?? [];
   if (exercises.length < 2) return;
 
-  const recent = db.getRecentWorkouts(chatId, 60); // last 60 days
-  // Skip the just-logged workout (first entry)
-  const previousWorkouts = recent.slice(1);
+  const norm = s => String(s || '').trim().toLowerCase();
+  const exerciseNames = [...new Set(exercises.map(e => norm(e.name)).filter(Boolean))];
 
-  const currentNames = new Set(exercises.map(e => e.name?.toLowerCase()));
-
-  // Find the most recent past workout with at least 2 matching exercises
-  const prev = previousWorkouts.find(w =>
-    (w.exercises ?? []).filter(e => currentNames.has(e.name?.toLowerCase())).length >= 2
-  );
-  if (!prev) return;
+  const recent = db.getRecentWorkouts(chatId, 90);
+  const previousWorkouts = recent.slice(1); // skip just-logged
 
   const state = db.getState(chatId);
   const tz = requireTimezone(state);
-  const prevDate = prev.date || new Date(prev.logged_at + getOffsetMs(tz)).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
-  const comparisonBlock = buildWorkoutComparisonBlock(currentWorkout, prev, prevDate);
-  const comparison = await claude.generateWorkoutComparison(comparisonBlock, prevDate, state);
+
+  // For each unique exercise, find most recent previous occurrence across any workout
+  const exerciseHistory = new Map();
+  for (const name of exerciseNames) {
+    for (const w of previousWorkouts) {
+      const match = (w.exercises ?? []).find(e => norm(e.name) === name);
+      if (match) {
+        const date = new Date(w.logged_at + getOffsetMs(tz)).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' });
+        exerciseHistory.set(name, { exercise: match, date, workoutName: w.workout_name ?? 'Workout' });
+        break;
+      }
+    }
+  }
+
+  if (exerciseNames.filter(n => exerciseHistory.has(n)).length < 2) return;
+
+  const comparisonBlock = buildWorkoutComparisonBlock(currentWorkout, exerciseHistory);
+  const comparison = await claude.generateWorkoutComparison(comparisonBlock, state);
   if (comparison) await bot.sendMessage(chatId, comparison);
 }
 

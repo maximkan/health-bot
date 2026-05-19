@@ -652,6 +652,7 @@ function startBot() {
           const parsed = await claude.parseLiveExercise(text);
           if (parsed?.name) {
             state.exercises.push(parsed);
+            state._createdAt = Date.now();
             const line = formatExerciseLine(parsed).trim();
             await bot.sendMessage(chatId, `${line} ✅\nnext exercise, or 'finished' to wrap up`);
           } else {
