@@ -839,13 +839,25 @@ function startBot() {
       }
 
       if (state.type === 'weekly_target_suggest') {
-        const isPositive = await claude.isPositiveResponse(msg.text || '').catch(() => false);
+        const txt = msg.text || '';
+        if (/\bhold\b/i.test(txt)) {
+          pendingStates.delete(chatId);
+          await bot.sendMessage(chatId, 'Got it — keeping current targets. Will check again in 2 weeks.');
+          return;
+        }
+        const isPositive = await claude.isPositiveResponse(txt).catch(() => false);
         if (isPositive) {
           pendingStates.delete(chatId);
-          await handleUpdateTargets(bot, msg, chatId);
+          if (state.proposedCalories) {
+            await db.updateTargets(chatId, { calories: state.proposedCalories, protein: state.proposedProtein, carbs: state.proposedCarbs, fat: state.proposedFat });
+            db.setState(chatId, { last_target_adjustment_at: Date.now() });
+            await bot.sendMessage(chatId, `✅ targets updated:\n${state.proposedCalories} kcal · ${state.proposedProtein}g P · ${state.proposedCarbs}g C · ${state.proposedFat}g F`);
+          } else {
+            await handleUpdateTargets(bot, msg, chatId);
+          }
         } else {
           pendingStates.delete(chatId);
-          await routeMessage(bot, msg, chatId, userState, earlyIntents);
+          await bot.sendMessage(chatId, 'Keeping current targets.');
         }
         return;
       }
@@ -986,6 +998,69 @@ async function handleTimezoneChange(bot, msg, chatId) {
 
 // ── Weekly review flow ────────────────────────────────────────────────────────
 
+function computeLinearSlope(points) {
+  const n = points.length;
+  const meanX = points.reduce((s, p) => s + p.x, 0) / n;
+  const meanY = points.reduce((s, p) => s + p.y, 0) / n;
+  const num = points.reduce((s, p) => s + (p.x - meanX) * (p.y - meanY), 0);
+  const den = points.reduce((s, p) => s + (p.x - meanX) ** 2, 0);
+  return den === 0 ? 0 : num / den;
+}
+
+function checkAdaptiveTargetProposal(chatId) {
+  const state  = db.getState(chatId);
+  const targets = db.getTargets(chatId);
+  if (!['lose', 'gain'].includes(state.goal)) return null;
+  if (state.last_target_adjustment_at && Date.now() - state.last_target_adjustment_at < 14 * 24 * 3600 * 1000) return null;
+
+  const sinceMs = Date.now() - 21 * 24 * 3600 * 1000;
+  const logs = db.getBodyLogsRaw(chatId, sinceMs);
+  if (logs.length < 3) return null;
+  const spanDays = (logs[logs.length - 1].logged_at - logs[0].logged_at) / 86400000;
+  if (spanDays < 12) return null;
+
+  const points = logs.map(l => ({ x: (l.logged_at - logs[0].logged_at) / 86400000, y: l.weight_kg }));
+  const meanY = points.reduce((s, p) => s + p.y, 0) / points.length;
+  const filtered = points.filter(p => Math.abs(p.y - meanY) <= 1.5);
+  if (filtered.length < 3) return null;
+
+  const slopePerDay = computeLinearSlope(filtered);
+  const weeklyRate  = slopePerDay * 7;
+
+  const { calculateBMR } = require('./utils/tdee');
+  const age  = ageFromBirthday(targets.birthday) ?? targets.age;
+  const tdee = calculateTDEE(targets.weight_kg, targets.height_cm, age, state.gym_days ?? 0, state.activity_level ?? 2, state.gender || 'male');
+  const dailyBalance  = tdee - targets.calories;
+  const expectedRate  = -(dailyBalance * 7) / 7700;
+  const drift = weeklyRate - expectedRate;
+  if (Math.abs(drift) < 0.2) return null;
+
+  const absDrift  = Math.abs(drift);
+  const step      = absDrift >= 0.7 ? 250 : absDrift >= 0.4 ? 200 : 100;
+  const direction = state.goal === 'lose' ? -Math.sign(drift) : Math.sign(drift);
+  const adjustment = direction * step;
+
+  const bmr    = calculateBMR(targets.weight_kg, targets.height_cm, age, state.gender || 'male');
+  const minCal = Math.max(state.gender === 'female' ? 1200 : 1500, Math.round(bmr * 1.1));
+  const maxCal = tdee + 500;
+  const proposedCalories = Math.max(minCal, Math.min(maxCal, targets.calories + adjustment));
+  if (proposedCalories === targets.calories) return null;
+
+  const protein = targets.protein;
+  const fat     = targets.fat;
+  const carbs   = Math.round(Math.max(0, (proposedCalories - protein * 4 - fat * 9) / 4) / 5) * 5;
+
+  return {
+    weeklyRate: +weeklyRate.toFixed(2),
+    expectedRate: +expectedRate.toFixed(2),
+    currentCalories: targets.calories,
+    proposedCalories,
+    protein, carbs, fat,
+    adjustment,
+    recentWeights: logs.slice(-3).map(l => l.weight_kg),
+  };
+}
+
 async function handleWeeklyReviewFlow(bot, msg, chatId) {
   await bot.sendChatAction(chatId, 'typing');
   try {
@@ -1031,6 +1106,29 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
         if (strengthSummary) await bot.sendMessage(chatId, strengthSummary);
       }
     } catch (err) { console.error('Weekly strength summary error:', err.message); }
+
+    // Adaptive target proposal
+    try {
+      const proposal = checkAdaptiveTargetProposal(chatId);
+      if (proposal) {
+        const rateSign = (r) => r < 0 ? `${Math.abs(r)} kg/week loss` : `${r} kg/week gain`;
+        const dir = proposal.adjustment < 0 ? 'lower' : 'higher';
+        const driftDesc = proposal.adjustment < 0 ? 'losing slower than planned' : 'losing faster than planned';
+        const proposalMsg = `Bi-weekly target check:\n\nLast weigh-ins: ${proposal.recentWeights.join(' → ')} kg\nObserved rate: ${rateSign(proposal.weeklyRate)} — expected: ${rateSign(proposal.expectedRate)}\n\nYou're ${driftDesc}. Suggest adjusting daily target from ${proposal.currentCalories} to ${proposal.proposedCalories} kcal (${proposal.adjustment > 0 ? '+' : ''}${proposal.adjustment}).\n\nNew macros would be: ${proposal.protein}g protein · ${proposal.carbs}g carbs · ${proposal.fat}g fat\n\nReply yes to apply, no to keep current, or hold to wait another 2 weeks.`;
+        const proposalSent = await bot.sendMessage(chatId, proposalMsg);
+        setPendingState(chatId, {
+          type: 'weekly_target_suggest',
+          proposedCalories: proposal.proposedCalories,
+          proposedProtein:  proposal.protein,
+          proposedCarbs:    proposal.carbs,
+          proposedFat:      proposal.fat,
+        });
+        db.setState(chatId, {
+          last_coach_message_id: proposalSent.message_id,
+          last_coach_context: JSON.stringify({ message: proposalMsg, context: '', timestamp: Date.now() }),
+        });
+      }
+    } catch (err) { console.error('Adaptive proposal error:', err.message); }
   } catch (err) {
     console.error('Weekly review flow error:', err.message);
   }

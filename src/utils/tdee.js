@@ -4,10 +4,11 @@ function calculateBMR(weight_kg, height_cm, age, gender = 'male') {
   return gender === 'female' ? base - 161 : base + 5;
 }
 
-// Combined NEAT (daily activity outside gym) + gym sessions
+// NEAT-only base (no gym embedded) + linear gym bonus per session
+// Base multipliers represent daily movement only, not structured training
 function activityFactor(weeklyWorkouts, activityLevel = 2) {
-  const neat = [0, 1.2, 1.375, 1.55, 1.725][activityLevel] || 1.375;
-  const gymBonus = weeklyWorkouts >= 5 ? 0.15 : weeklyWorkouts >= 3 ? 0.1 : weeklyWorkouts >= 1 ? 0.05 : 0;
+  const neat = [0, 1.15, 1.25, 1.35, 1.50][activityLevel] || 1.25;
+  const gymBonus = Math.max(0, Math.min(weeklyWorkouts, 7)) * 0.04;
   return Math.min(neat + gymBonus, 1.9);
 }
 

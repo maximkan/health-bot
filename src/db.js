@@ -755,6 +755,10 @@ function getAllBodyMeasurements(chatId) {
     .map(r => ({ date: new Date(r.logged_at).toISOString().split('T')[0], weight_kg: r.weight_kg, body_fat_pct: r.body_fat_pct, bmi: r.bmi }));
 }
 
+function getBodyLogsRaw(chatId, sinceMs = 0) {
+  return db.prepare('SELECT id, weight_kg, logged_at FROM body_log WHERE chat_id=? AND logged_at >= ? ORDER BY logged_at ASC').all(chatId, sinceMs);
+}
+
 // ── Historical data (replaces Notion getHistoricalData) ───────────────────────
 
 function getHistoricalDataFromSQLite(chatId) {
@@ -914,7 +918,7 @@ upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKn
   saveWorkoutLog, getRecentWorkouts, saveRecoveryLog, saveSleepLog, getLastSleepLog,
   getTodayEntriesFromSQLite, deleteTodayEntry, getWeekDataFromSQLite, getWeeklyReviewData,
   setLogBotMessageId, getLogByBotMessageId, renameLog, getLastLogEntry, getRecentLogs,
-  saveBodyLog, getLastBodyMeasurement, getAllBodyMeasurements, getHistoricalDataFromSQLite,
+  saveBodyLog, getLastBodyMeasurement, getAllBodyMeasurements, getBodyLogsRaw, getHistoricalDataFromSQLite,
   updateLogTime, getEntriesForDay,
   saveCoachConversation, getRecentConversationSummaries, getUserProfile, setUserProfile,
   getTargets, getTargetsText, updateTargets,
