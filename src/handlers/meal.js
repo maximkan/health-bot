@@ -20,21 +20,34 @@ function formatPreview(data) {
   return lines.join('\n');
 }
 
+function progressBar(actual, target, width = 10) {
+  const fill = Math.min(width, Math.max(0, Math.round((actual / target) * width)));
+  return '█'.repeat(fill) + '░'.repeat(width - fill);
+}
+
+function remainLabel(left, unit) {
+  return left >= 0 ? `${left}${unit} left` : `${Math.abs(left)}${unit} over ⚠️`;
+}
+
 function formatConfirmation(data, totals, targets) {
   const T = targets;
-  const cal  = Math.round(totals?.calories ?? 0);
-  const prot = Math.round(totals?.protein  ?? 0);
-  const calLeft  = T.calories - cal;
+  const m = data.totals;
 
   const retroLabel = data.date ? ` (${data.date})` : '';
-  const lines = [
-    `✅ ${data.meal_name}${retroLabel} — ${Math.round(data.totals.calories)} kcal · ${Math.round(data.totals.protein)}g P`,
-  ];
+  const mealMacros = `${Math.round(m.calories)} kcal · ${Math.round(m.protein)}g P · ${Math.round(m.carbs ?? 0)}g C · ${Math.round(m.fat ?? 0)}g F`;
+  const lines = [`✅ ${data.meal_name}${retroLabel} — ${mealMacros}`];
   if ((data.caffeine_mg ?? 0) > 0) lines[0] += ` · ☕ ${data.caffeine_mg}mg`;
+
   if (totals && !data.date) {
-    lines.push(`📊 today: ${cal} / ${T.calories} kcal · ${prot} / ${T.protein}g P`);
-    if (calLeft > 0)       lines.push(`${calLeft} kcal left 💪`);
-    else if (calLeft < -50) lines.push(`⚠️ ${Math.abs(calLeft)} kcal over target`);
+    const cal  = Math.round(totals.calories ?? 0);
+    const prot = Math.round(totals.protein  ?? 0);
+    const carb = Math.round(totals.carbs    ?? 0);
+    const fat  = Math.round(totals.fat      ?? 0);
+    lines.push('');
+    lines.push(`kcal ${progressBar(cal,  T.calories)} ${cal} / ${T.calories}   ${remainLabel(T.calories - cal,  '')}`);
+    lines.push(`P    ${progressBar(prot, T.protein)}  ${prot} / ${T.protein}g  ${remainLabel(T.protein - prot, 'g')}`);
+    lines.push(`C    ${progressBar(carb, T.carbs)}  ${carb} / ${T.carbs}g  ${remainLabel(T.carbs - carb, 'g')}`);
+    lines.push(`F    ${progressBar(fat,  T.fat)}  ${fat} / ${T.fat}g  ${remainLabel(T.fat - fat, 'g')}`);
   }
   return lines.join('\n');
 }
