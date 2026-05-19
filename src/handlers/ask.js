@@ -223,18 +223,18 @@ async function buildDayContext(chatId) {
   if (timedTomorrow.length && getHourTz(tz) >= 19) lines.push(`Tomorrow's plans: ${timedTomorrow.map(p => `${p.plan_text} at ${p.plan_time}`).join(', ')}`);
   if (tasks.length)         lines.push(`Pending tasks: ${tasks.map(p => p.plan_text).join(', ')}`);
 
-  // TDEE / maintenance
+  // TDEE / maintenance — computed in code, injected as fact for the model to use as-is
   try {
     const targets = db.getTargets(chatId);
-    const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
-    const weeklyWorkouts = weekData?.trainDays ?? 3;
     const weight = latestBody?.weight_kg ?? targets?.weight_kg;
     const height = targets?.height_cm;
     const age = ageFromBirthday(targets?.birthday) ?? targets?.age;
     if (weight && height && age && state.activity_level && state.gender) {
-      const tdee = calculateTDEE(weight, height, age, weeklyWorkouts, state.activity_level, state.gender);
+      const tdee = calculateTDEE(weight, height, age, state.gym_days ?? 0, state.activity_level, state.gender);
       const deficit = targets?.calories ? tdee - targets.calories : null;
-      lines.push(`Maintenance (TDEE): ${tdee} kcal/day${deficit != null ? ` — target is ${targets.calories} kcal (${deficit} kcal daily deficit)` : ''}`);
+      const paceKg = deficit ? +(deficit / 1100).toFixed(2) : null;
+      lines.push(`Maintenance (TDEE): ${tdee} kcal/day [DO NOT RECALCULATE — use this number]`);
+      if (deficit != null) lines.push(`Daily deficit: ${deficit} kcal (target ${targets.calories} kcal vs maintenance ${tdee} kcal) → ~${paceKg} kg/week loss at full adherence`);
     }
   } catch {}
 

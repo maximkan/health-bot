@@ -1078,7 +1078,7 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
       const height = targets?.height_cm;
       const age = ageFromBirthday(targets?.birthday) ?? targets?.age;
       if (weight && height && age && state.activity_level && state.gender) {
-        tdee = calculateTDEE(weight, height, age, weekData?.trainDays ?? 3, state.activity_level, state.gender);
+        tdee = calculateTDEE(weight, height, age, state.gym_days ?? 0, state.activity_level, state.gender);
       }
     } catch {}
 
