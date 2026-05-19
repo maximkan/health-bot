@@ -16,6 +16,7 @@ const { handleOnboarding } = require('./handlers/onboarding');
 const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { nowContextTz, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
+const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
 
 const pendingStates = new Map();
 const mediaGroups   = new Map();
@@ -995,7 +996,18 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     const targetsCtx = db.getTargetsText(chatId);
     const targets    = db.getTargets(chatId);
 
-    const review = await claude.generateWeeklyReview(weekData, targetsCtx, state, targets);
+    let tdee = null;
+    try {
+      const latestBody = db.getLastBodyMeasurement(chatId);
+      const weight = latestBody?.weight_kg ?? targets?.weight_kg;
+      const height = targets?.height_cm;
+      const age = ageFromBirthday(targets?.birthday) ?? targets?.age;
+      if (weight && height && age && state.activity_level && state.gender) {
+        tdee = calculateTDEE(weight, height, age, weekData?.trainDays ?? 3, state.activity_level, state.gender);
+      }
+    } catch {}
+
+    const review = await claude.generateWeeklyReview(weekData, targetsCtx, state, { ...targets, tdee });
     const sent = await bot.sendMessage(chatId, review);
 
     db.setState(chatId, {

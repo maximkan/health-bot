@@ -3,6 +3,7 @@ const gcal   = require('../gcal');
 const db     = require('../db');
 const { nowContextTz, getDateStrTz, getTomorrowStrTz, getHourTz, getOffsetMs, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
+const { calculateTDEE, ageFromBirthday } = require('../utils/tdee');
 
 function buildFullAnalysisBlock({ bodyMeasurements = [], historical = {}, targets = {} }) {
   const DAY  = 24 * 3600 * 1000;
@@ -221,6 +222,21 @@ async function buildDayContext(chatId) {
   if (allToday.length)      lines.push(`Today's plans: ${allToday.join(', ')}`);
   if (timedTomorrow.length && getHourTz(tz) >= 19) lines.push(`Tomorrow's plans: ${timedTomorrow.map(p => `${p.plan_text} at ${p.plan_time}`).join(', ')}`);
   if (tasks.length)         lines.push(`Pending tasks: ${tasks.map(p => p.plan_text).join(', ')}`);
+
+  // TDEE / maintenance
+  try {
+    const targets = db.getTargets(chatId);
+    const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 24 * 3600 * 1000);
+    const weeklyWorkouts = weekData?.trainDays ?? 3;
+    const weight = latestBody?.weight_kg ?? targets?.weight_kg;
+    const height = targets?.height_cm;
+    const age = ageFromBirthday(targets?.birthday) ?? targets?.age;
+    if (weight && height && age && state.activity_level && state.gender) {
+      const tdee = calculateTDEE(weight, height, age, weeklyWorkouts, state.activity_level, state.gender);
+      const deficit = targets?.calories ? tdee - targets.calories : null;
+      lines.push(`Maintenance (TDEE): ${tdee} kcal/day${deficit != null ? ` — target is ${targets.calories} kcal (${deficit} kcal daily deficit)` : ''}`);
+    }
+  } catch {}
 
   return lines.join('\n');
 }

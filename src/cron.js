@@ -1,9 +1,10 @@
 const cron = require('node-cron');
 const db   = require('./db');
 const { getOffsetMs, getDateAt, getDateStrTz, requireTimezone } = require('./utils/time');
+const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
 
 function buildProactiveDataBlock(recentData) {
-  const { today, targets, recentWeek, recentAlerts, todayAlert, caffeine_mg, last_caffeine_time, hasWorkout, last_sleep, noMealsYet, minutesAwake } = recentData;
+  const { today, targets, tdee, recentWeek, recentAlerts, todayAlert, caffeine_mg, last_caffeine_time, hasWorkout, last_sleep, noMealsYet, minutesAwake } = recentData;
   const lines = [];
 
   if (today && targets) {
@@ -19,6 +20,9 @@ function buildProactiveDataBlock(recentData) {
     lines.push(macroLine('protein',  today.protein,  targets.protein,  'under'));
     lines.push(macroLine('carbs',    today.carbs,    targets.carbs,    'over'));
     lines.push(macroLine('fat',      today.fat,      targets.fat,      'over'));
+    if (tdee && targets?.calories) {
+      lines.push(`- maintenance (TDEE): ${tdee} kcal — target ${targets.calories} kcal (${tdee - targets.calories} kcal deficit)`);
+    }
     lines.push('');
   }
 
@@ -268,10 +272,21 @@ async function runProactiveForUser(chatId, timeLabel) {
       ? state.last_proactive_msg : null;
 
     const lastSleep = db.getLastSleepLog(chatId);
+    let tdee = null;
+    try {
+      const latestBody = db.getLastBodyMeasurement(chatId);
+      const weight = latestBody?.weight_kg ?? targets?.weight_kg;
+      const height = targets?.height_cm;
+      const age = ageFromBirthday(targets?.birthday) ?? targets?.age;
+      if (weight && height && age && state.activity_level && state.gender) {
+        tdee = calculateTDEE(weight, height, age, weekData?.trainDays ?? 3, state.activity_level, state.gender);
+      }
+    } catch {}
     const recentData = {
       minutesAwake,
       today: { ...dayData.totals, meals: dayData.meals.map(m => m.name), recovery: dayData.recovery },
       targets,
+      tdee,
       noMealsYet: noMeals,
       caffeine_mg: state.caffeine_today_mg ?? 0,
       last_caffeine_time: state.last_caffeine_time,
