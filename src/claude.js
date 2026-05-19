@@ -1,5 +1,6 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const config = require('./config');
+const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -704,47 +705,35 @@ EMOJI USE:
 
 async function generateOnboardingTargets(stats) {
   const { name, weight_kg, height_cm, age, gender, goal, goal_weight, body_fat_pct, activity_level, gym_days, language } = stats;
-  const activityDesc = ['', 'sedentary (desk job, minimal movement)', 'lightly active (some walking)', 'moderately active (7k+ steps daily)', 'very active (physical job)'][activity_level] || 'lightly active';
-  const langInstr = language && !/^en(glish)?$/i.test(language.trim()) ? `Write the explanation in ${language}.` : '';
-  const prompt = `You are setting up a personalized nutrition plan for ${name}.
+  const resolvedAge = typeof age === 'number' ? age : ageFromBirthday(age);
 
-Stats:
-- Age: ${age}, Height: ${height_cm}cm, Weight: ${weight_kg}kg, Gender: ${gender || 'male'}
-- Goal: ${goal === 'lose' ? `lose weight → target ${goal_weight}kg` : goal === 'gain' ? `gain muscle → target ${goal_weight}kg` : goal === 'maintain' ? 'maintain weight / recomp' : 'track habits and health'}
-- Body fat: ${body_fat_pct ? body_fat_pct + '%' : 'unknown'}
-- Daily activity: ${activityDesc}
-- Training: ${gym_days ? gym_days + ' days/week' : 'no gym'}
+  // All numbers computed deterministically — no LLM arithmetic
+  const tdee = calculateTDEE(weight_kg, height_cm, resolvedAge, gym_days ?? 0, activity_level ?? 2, gender || 'male');
+  const calories = goal === 'lose' ? tdee - 500 : goal === 'gain' ? tdee + 350 : tdee;
+  const protein  = Math.round((weight_kg * 2.1) / 5) * 5;
+  const fat      = Math.round((weight_kg * 0.9) / 5) * 5;
+  const carbs    = Math.round(((calories - protein * 4 - fat * 9) / 4) / 5) * 5;
 
-Calculate in this exact order:
-1. BMR using Mifflin-St Jeor: male → (10×weight)+(6.25×height)-(5×age)+5, female → (10×weight)+(6.25×height)-(5×age)-161
-2. TDEE = BMR × activity multiplier
-3. Target calories = TDEE ${goal === 'lose' ? '− 500 (deficit for ~0.5kg/week loss)' : goal === 'gain' ? '+ 350 (surplus for muscle gain)' : '(maintenance)'}
-4. Protein = 2.0–2.2g × weight_kg (round to nearest 5g)
-5. Fat = 0.9g × weight_kg (round to nearest 5g)
-6. Carbs = (target_calories − protein×4 − fat×9) ÷ 4 (round to nearest 5g)
+  const activityDesc = ['', 'sedentary', 'lightly active', 'moderately active', 'very active'][activity_level] || 'moderately active';
+  const langInstr = language && !/^en(glish)?$/i.test(language.trim()) ? `Write in ${language}.` : '';
+  const prompt = `Write a 2-3 sentence explanation for ${name}'s personalized nutrition plan. Friendly, plain language — like a knowledgeable friend, no jargon or abbreviations.
 
-CRITICAL: protein×4 + carbs×4 + fat×9 MUST equal target_calories exactly. Adjust carbs to make it balance.
+Their stats: ${resolvedAge}yo ${gender || 'male'}, ${weight_kg}kg, ${height_cm}cm, ${activityDesc}, ${gym_days ?? 0} gym days/week.
+Goal: ${goal === 'lose' ? `lose weight (target ${goal_weight}kg)` : goal === 'gain' ? `gain muscle (target ${goal_weight}kg)` : 'maintain weight / recomp'}.
+Their plan: ${calories} kcal/day (maintenance is ${tdee} kcal, ${goal === 'lose' ? '500 kcal deficit' : goal === 'gain' ? '350 kcal surplus' : 'at maintenance'}), ${protein}g protein, ${carbs}g carbs, ${fat}g fat.
 
-For the explanation: write 2-3 sentences in simple, friendly language — like a knowledgeable friend, not a doctor. No abbreviations (BMR, TDEE, etc.) — explain everything in plain words. ${langInstr}
-
-Return ONLY valid JSON:
-{
-  "calories": 0,
-  "protein": 0,
-  "carbs": 0,
-  "fat": 0,
-  "tdee": 0,
-  "explanation": "..."
-}`;
+Explain why these numbers make sense for their goal. ${langInstr}
+Return ONLY valid JSON: {"explanation": "..."}`;
 
   const OPUS = 'claude-opus-4-7';
-  const langSystem = language && !/^en(glish)?$/i.test(language.trim()) ? ` Write the explanation field in ${language}.` : '';
+  const langSystem = language && !/^en(glish)?$/i.test(language.trim()) ? ` Respond in ${language}.` : '';
   const response = await anthropic.messages.create({
-    model: OPUS, max_tokens: 512,
-    system: `You are an expert sports nutritionist. Calculate precise macro targets. Return only valid JSON.${langSystem}`,
+    model: OPUS, max_tokens: 300,
+    system: `You are a friendly health coach writing a short plan explanation.${langSystem}`,
     messages: [{ role: 'user', content: prompt }],
   });
-  return parseJSON(response.content[0].text);
+  const parsed = parseJSON(response.content[0].text);
+  return { calories, protein, carbs, fat, tdee, explanation: parsed?.explanation ?? '' };
 }
 
 async function parseOnboardingInput(step, text) {

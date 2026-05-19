@@ -117,6 +117,7 @@ async function handleOnboarding(bot, msg) {
       const q = state.goal === 'lose' ? 'What weight are you aiming to reach?' : "What's your target weight for bulking?";
       await send(bot, chatId, q, lang);
     } else {
+      db.setTargetsInDb(chatId, { goal_weight: parsed.weight_kg });
       db.setState(chatId, { onboard_step: S.BODY_FAT });
       await send(bot, chatId, "What body composition metrics do you track?\n\nShare what you have (e.g. \"18% body fat\", \"75kg muscle mass\", or both), or say skip.", lang);
     }
