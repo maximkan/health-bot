@@ -188,7 +188,7 @@ function formatExerciseLine(e) {
       if (d.sets && d.reps) s += ` ${d.sets}×${d.reps}`;
       if (d.weight_kg) s += ` @${d.weight_kg}kg`;
     } else {
-      s += ' ' + e.sets_detail.map(d => `${d.sets}×${d.reps}${d.weight_kg ? '@' + d.weight_kg + 'kg' : ''}`).join(' + ');
+      s += ' ' + e.sets_detail.map(d => `${d.sets ?? 1}×${d.reps}${d.weight_kg ? '@' + d.weight_kg + 'kg' : ''}`).join(' + ');
     }
   } else if (e.duration_sec) {
     s += ` ${e.sets ?? 1}×${e.duration_sec}s`;

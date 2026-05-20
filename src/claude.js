@@ -691,6 +691,11 @@ Rules:
 - For general nutrition questions (calories in X, macros of Y, can I eat Z): answer directly from your own knowledge. Never say "it's not in your known foods" or refuse to answer — Known Foods is only for logging accuracy, not a limit on what you can discuss.
 - Never reference the conversation or context mechanics. Don't say "based on your previous message", "from our conversation", "as mentioned earlier", "given what you said". Just answer naturally as if it's a continuous conversation — the user knows what they asked.
 - All durations must be formatted as Xh Ym (e.g. 7h 36m, 1h 5m). Never use decimal hours (7.5h, 7.1h) anywhere in responses.
+FORMATTING:
+- Each distinct thought or topic goes on its own line. Never run multiple unrelated points into one sentence.
+- Emojis mark the start of a new line/thought — one emoji per line, at the beginning. Never mid-sentence.
+- Plans and reminders: one item per line, no commas joining them.
+- Use a blank line to separate clearly different sections (food vs workout vs sleep vs tomorrow).
 EMOJI USE:
 - Match emoji sentiment to the sentiment of the line they're on.
 - 💪🔥⚡ = genuine wins only (target hit, training milestone, streak)
@@ -909,12 +914,14 @@ async function generateDaySummary({ dataSummary, exampleForStyle }, userProfile 
 ${dataSummary}
 
 OUTPUT REQUIREMENTS:
+- Each distinct point on its own line. No run-on paragraphs.
+- Emojis at the start of the line they belong to, never mid-sentence.
 - Mention every macro line marked "(flag)" — state the actual number and the target.
 - Skip macros not flagged.
 - If sleep is "not logged", skip the sleep mention entirely. Otherwise comment briefly on it.
 - If workouts section says "none", mention no training today. Otherwise name the type and duration or kcal burned.
 - Close with one line starting "prep for tomorrow:" plus one specific action.
-- 5–7 sentences total.
+- 5–7 lines total.
 
 GOOD EXAMPLE (calibrated to the user's coaching style):
 ${exampleForStyle}`;
@@ -933,13 +940,15 @@ async function generateEveningCheck({ dataSummary, exampleForStyle }, userProfil
 ${dataSummary}
 
 OUTPUT REQUIREMENTS:
+- Each distinct point on its own line. No run-on paragraphs.
+- Emojis at the start of the line they belong to, never mid-sentence.
 - Lead with calories remaining vs target (exact numbers).
 - Mention every macro line marked "(flag)" with the actual number and target. For protein specifically — if flagged as UNDER — give one concrete suggestion to close the gap (e.g. "chicken breast or a shake").
 - If caffeine is marked "[flag]", mention it briefly.
-- If "User reminders" section is present, include each item as a one-line reminder.
-- If "Upcoming plans" section is present, list each plan exactly as written. Do not add speculation.
+- If "User reminders" section is present, each reminder on its own line.
+- If "Upcoming plans" section is present, each plan on its own line. Do not add speculation.
 - Close with one line starting "prep for tomorrow:" + one specific action.
-- 4–6 sentences total.
+- 4–6 lines total.
 - Do not invent historical patterns ("4 days in a row…") — you only have today's data.
 
 GOOD EXAMPLE (calibrated to the user's coaching style):
