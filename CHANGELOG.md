@@ -4,9 +4,9 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-25
 
-### Cost/latency pass — batch 3 (B5 instant menu logging)
-- **Fully-specified NS menu meals log instantly, no AI.** When a text meal message resolves to exactly one of today's menu items with the variant pinned and no modifiers (e.g. "double chicken lunch sweet potato"), the macros come straight from `known_foods` — instant, free, exact. — `handlers/meal.js`
-- **Safety first:** anything ambiguous still goes to the AI, unchanged — no variant ("double chicken lunch"), base ambiguity, any modifier ("half", "no rice", a quantity), drinks/coffee (caffeine), dinner (needs portions), or a novel food. The code only "wins" when 100% certain, so it can never log the wrong thing. Verified 11/11 against the real menu + correct macros on save.
+### Cost/latency pass — batch 3 (B5 instant repeat-food logging)
+- **Any food you log the same way logs instantly, no AI** — works for every user, not just menu users. When a text message resolves to exactly one of your known foods (a yogurt, a smoothie, a protein shake, or a fully-specified menu item like "double chicken lunch sweet potato"), the macros come straight from `known_foods`. Day-specific menus are scoped to today; plain repeats match by name. — `handlers/meal.js`
+- **Safety first:** anything ambiguous goes to the AI, unchanged — underspecified ("yogurt", "double chicken lunch"), any genuine name collision (even across past-logged foods), any modifier ("half", "no rice", a quantity), caffeinated drinks (caffeine isn't stored), or a novel food. The matcher only "wins" when it's 100% certain, and you still see the preview + confirm. It can never log the wrong thing.
 
 ### Cost/latency pass — batch 2 (B1 inline buttons)
 - **Tap-to-confirm instead of typing.** Meal and workout previews now show **✅ Log · ✏️ Edit · ❌ Cancel** buttons; the live-workout prompt shows a **🏁 Finished** button. Tapping is instant (no AI round-trip) and you can still type "ok"/"done" as before. Buttons survive a restart (they read the DB-backed pending state). — `bot.js`, `handlers/meal.js`, `handlers/workout.js`, new `utils/keyboards.js`

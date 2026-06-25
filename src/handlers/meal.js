@@ -2,34 +2,38 @@ const claude = require('../claude');
 const db     = require('../db');
 const { MEAL_PREVIEW_KB } = require('../utils/keyboards');
 
-// B5: strict menu lookup. Returns a known_foods row ONLY when the message resolves to exactly one
-// of today's menu items with the variant pinned and no modifiers — otherwise null (→ AI handles it).
-// Safety property: any ambiguity/modifier/novelty → null → today's exact AI behavior. Never a wrong log.
+// B5: instant logging for any food the user repeats verbatim — matches the message against their
+// known foods for today (which already scopes day-specific menus and includes day-agnostic repeats
+// like a yogurt or smoothie). Returns a known_foods row ONLY on a confident, unambiguous, modifier-free
+// match; otherwise null (→ the AI handles it, exactly as today). The preview+confirm is the final check.
+// Safety: any ambiguity / modifier / caffeinated drink / novelty → null → no risk of a wrong log.
+const _FILLER = new Set(['had','ate','eat','eaten','just','i','a','an','the','for','today','also','and','my','with','of','got','having','have','at','some','ns','lunch','dinner','meal','plate','plates','breakfast','snack','drink','please','log','ok','one']);
+const _MODIFIER_RE = /\d|%|\b(half|quarter|without|no|skip|only|less|more|light|didn'?t|instead|minus|extra|plus|bit|grams?|ml|kg)\b/;
+const _CAFFEINE_RE = /\b(coffee|espresso|latte|cappuccino|americano|mocha|macchiato|flat white|tea|matcha|chai|energy|red ?bull|cola|coke|monster)\b/;
+// distinctive words of a food name: drop [bracket tags] (week/source noise) but KEEP (paren) base words.
+const _words = (s) => String(s || '').toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(w => w && !_FILLER.has(w));
+const _identity = (set) => [...set].sort().join(' ');
+
 function matchKnownMeal(caption, foods) {
   const lc = (caption || '').toLowerCase().trim();
-  // Must name a meal type we can scope to (lunch/dinner menus are day-tagged).
-  const meal = /\blunch\b/.test(lc) ? 'lunch' : /\bdinner\b/.test(lc) ? 'dinner' : null;
-  if (!meal) return null;
-  // Any quantity / partial / exclusion → let the AI recompute (this is the user's correctness concern).
-  if (/\d|%|\b(half|quarter|without|no|skip|only|less|more|light|didn'?t|instead|minus|extra|plus|some|bit|grams?|ml)\b/.test(lc)) return null;
-  // Variant must be explicit — the menu lists Regular AND Double for each dish, so absence is ambiguous.
-  const variant = /\bdouble\b/.test(lc) ? 'double' : /\bregular\b/.test(lc) ? 'regular' : null;
-  if (!variant) return null;
-  const STOP = new Set(['had','ate','eat','eaten','just','i','a','an','the','for','today','also','and','my','ns','lunch','dinner','regular','double','plate','plates','meal','with','got','having','have','at']);
-  const keywords = lc.replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(w => w && !STOP.has(w));
-  if (!keywords.length) return null;
-  const cand = foods.filter(f => {
-    const name  = (f.name  || '').toLowerCase();
-    const notes = (f.notes || '').toLowerCase();
-    if (notes.includes('cafe') || notes.includes('beverage')) return false; // drinks carry caffeine the table doesn't store → AI
-    const isMeal = meal === 'lunch'
-      ? (notes.startsWith('lunch') || (name.includes('week]') && !name.includes('[dinner')))
-      : (notes.startsWith('dinner') || name.includes('[dinner'));
-    if (!isMeal) return false;
-    if (!name.includes(variant)) return false;
-    return keywords.every(k => name.includes(k));
-  });
-  return cand.length === 1 ? cand[0] : null; // 0 or ambiguous → AI
+  if (!lc || _MODIFIER_RE.test(lc)) return null; // quantity / partial / exclusion → AI recomputes
+  const msg = _words(lc);
+  if (!msg.length) return null;
+  const msgSet = new Set(msg);
+  // candidates: foods whose distinctive words contain all the message words (exact, or a ≥2-word subset)
+  const cand = [];
+  for (const f of foods) {
+    if (_CAFFEINE_RE.test((f.name || '').toLowerCase())) continue; // caffeine isn't stored → let the AI handle it
+    const fw = new Set(_words(f.name));
+    if (!fw.size || !msg.every(w => fw.has(w))) continue;
+    if (fw.size === msgSet.size || msg.length >= 2) cand.push({ f, id: _identity(fw) });
+  }
+  if (!cand.length) return null;
+  // Group by dish identity. One identity = same dish (auto-saved + menu copies collapse). Multiple
+  // identities = a genuine fork (Soba vs Sweet Potato, Regular vs Double) → ambiguous → AI.
+  if (new Set(cand.map(c => c.id)).size !== 1) return null;
+  // Same dish: prefer the canonical menu/seed entry over an auto-saved copy.
+  return (cand.find(c => /lunch|dinner|week/i.test(c.f.notes || '')) || cand[0]).f;
 }
 const { getDayOfWeekTz, nowContextTz, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
@@ -100,7 +104,7 @@ async function showMealPreview(bot, msg, photos) {
 
     const institutionKeywords = userState?.institution_keywords || null;
 
-    // B5: skip the AI when the message resolves to exactly one of today's menu items (text-only).
+    // B5: skip the AI when the message resolves to exactly one of the user's known foods (text-only).
     if (!hasPhoto && caption) {
       try {
         const m = matchKnownMeal(caption, db.getKnownFoodsForDay(chatId, dayOfWeek, weekType));
