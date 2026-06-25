@@ -4,6 +4,10 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-25
 
+### Cost/latency pass — batch 2 (B1 inline buttons)
+- **Tap-to-confirm instead of typing.** Meal and workout previews now show **✅ Log · ✏️ Edit · ❌ Cancel** buttons; the live-workout prompt shows a **🏁 Finished** button. Tapping is instant (no AI round-trip) and you can still type "ok"/"done" as before. Buttons survive a restart (they read the DB-backed pending state). — `bot.js`, `handlers/meal.js`, `handlers/workout.js`, new `utils/keyboards.js`
+- Verified: Log writes the entry + clears state, Cancel cancels, Edit keeps the preview open, Finish names the session (e.g. "Leg Day") and moves to confirm.
+
 ### Cost/latency pass — batch 1 (B3 parsers→code, B6 model fixes)
 - **`nameWorkout` is now pure code, not an AI call.** Live-workout naming (Leg Day / Upper Body / Mixed Strength & Cardio / etc.) is a deterministic keyword lookup — instant, free, and verified to reproduce the AI's labels on real sessions (8/8). — `claude.js`
 - **Cheaper model for `parseCorrection`** (what kind of correction is this?): Sonnet → Haiku — same results, ~3–5× cheaper. — `claude.js`

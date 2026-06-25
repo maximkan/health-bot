@@ -17,6 +17,7 @@ const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { nowContextTz, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
 const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
+const { MEAL_PREVIEW_KB, WORKOUT_PREVIEW_KB, LIVE_WORKOUT_KB } = require('./utils/keyboards');
 
 // DB-backed so in-flight conversation flows survive process restarts. Same .set/.get/.has/.delete
 // API as the old Map (better-sqlite3 is synchronous, so this is a drop-in). Code that MUTATES a
@@ -202,7 +203,7 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
     switch (intent) {
       case 'WORKOUT_START': {
         setPendingState(chatId, { type: 'live_workout', exercises: [], startTime: Date.now() });
-        await bot.sendMessage(chatId, 'got it — send me your exercises one by one as you finish them. say "done" when you\'re finished.');
+        await bot.sendMessage(chatId, 'got it — send me your exercises one by one as you finish them. say "done" (or tap 🏁) when you\'re finished.', LIVE_WORKOUT_KB);
         return;
       }
       case 'WORKOUT_LOG': {
@@ -388,6 +389,71 @@ async function routeMessage(bot, msg, chatId, userState, preIntents = null) {
     if (retro) msg._retroDate = retro;
   }
   await dispatchIntents(bot, msg, chatId, userState, intents);
+}
+
+// ── Inline-button (callback_query) actions ────────────────────────────────────
+// Mirror the typed confirm/edit/cancel/finish paths. Each reads the user's DB-backed pending
+// state, so a tap works even after a restart. Typed replies still work unchanged.
+
+async function mealButtonAction(bot, chatId, action) {
+  const state = pendingStates.get(chatId);
+  if (!state || state.type !== 'meal_confirm') return; // stale button (already resolved)
+  const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
+  if (action === 'cancel') {
+    pendingStates.delete(chatId);
+    await bot.sendMessage(chatId, '❌ Cancelled. Nothing logged.');
+    if (state.catchupRetro) { await bot.sendMessage(chatId, 'anything else? (or done)'); setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro }); }
+  } else if (action === 'edit') {
+    await bot.sendMessage(chatId, 'tell me what to fix');
+  } else { // log
+    if (state.needsClarification) {
+      setPendingState(chatId, { ...state, needsClarification: false });
+      await bot.sendMessage(chatId, formatPreview(mealData), MEAL_PREVIEW_KB);
+      return;
+    }
+    pendingStates.delete(chatId);
+    await logMeal(bot, chatId, mealData, state.dayStart);
+    if (state.catchupRetro) { await bot.sendMessage(chatId, 'anything else? (or done)'); setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro }); }
+  }
+}
+
+async function workoutButtonAction(bot, chatId, action) {
+  const state = pendingStates.get(chatId);
+  if (!state || state.type !== 'workout_confirm') return;
+  if (action === 'edit') { await bot.sendMessage(chatId, 'tell me what to fix'); return; }
+  pendingStates.delete(chatId);
+  if (action !== 'log') { await bot.sendMessage(chatId, '❌ Cancelled.'); return; }
+  const st = db.getState(chatId);
+  await logWorkout(bot, chatId, state.workoutData, st.current_day_start);
+  if (state.queuedMealMsg) {
+    const retroDate = state.queuedMealMsg._retroDate;
+    const data = await showMealPreview(bot, state.queuedMealMsg, null);
+    if (!data) setPendingState(chatId, { type: 'meal_text_clarification', originalText: state.queuedMealMsg.text, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
+    else       setPendingState(chatId, { type: 'meal_confirm', mealData: data, needsClarification: !!data._needsClarification, dayStart: state.queuedMealDayStart, retroDate: retroDate?.dateStr });
+    return;
+  }
+  if (state.catchupRetro) { await bot.sendMessage(chatId, 'anything else? (or done)'); setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro }); }
+}
+
+async function liveFinishAction(bot, chatId) {
+  const state = pendingStates.get(chatId);
+  if (!state || state.type !== 'live_workout') return;
+  if (!state.exercises || state.exercises.length === 0) {
+    pendingStates.delete(chatId);
+    await bot.sendMessage(chatId, 'no exercises logged. cancelled.');
+    return;
+  }
+  pendingStates.delete(chatId);
+  const durationMin = Math.round((Date.now() - state.startTime) / 60000);
+  const workoutData = {
+    workout_name: claude.nameWorkout(state.exercises),
+    activity_type: 'weights',
+    duration_min: durationMin || null,
+    exercises: state.exercises,
+  };
+  workoutData.calories_burned = computeWorkoutCalories(chatId, workoutData);
+  await bot.sendMessage(chatId, formatWorkoutPreview(workoutData), WORKOUT_PREVIEW_KB);
+  setPendingState(chatId, { type: 'workout_confirm', workoutData });
 }
 
 // ── Main bot setup ────────────────────────────────────────────────────────────
@@ -749,7 +815,7 @@ function startBot() {
           };
           workoutData.calories_burned = computeWorkoutCalories(chatId, workoutData);
           const preview = formatWorkoutPreview(workoutData);
-          await bot.sendMessage(chatId, preview);
+          await bot.sendMessage(chatId, preview, WORKOUT_PREVIEW_KB);
           setPendingState(chatId, { type: 'workout_confirm', workoutData });
           return;
         }
@@ -763,7 +829,7 @@ function startBot() {
             state._createdAt = Date.now();
             pendingStates.set(chatId, state);
             const line = formatExerciseLine(parsed).trim();
-            await bot.sendMessage(chatId, `${line} ✅\nnext exercise, or 'finished' to wrap up`);
+            await bot.sendMessage(chatId, `${line} ✅\nnext exercise, or 'finished' to wrap up`, LIVE_WORKOUT_KB);
           } else {
             await bot.sendMessage(chatId, "didn't catch that — try: 'bench press 3x10 100kg'");
           }
@@ -810,7 +876,7 @@ function startBot() {
           try {
             const updated = await claude.applyWorkoutCorrection(state.workoutData, text);
             updated.calories_burned = computeWorkoutCalories(chatId, updated);
-            await bot.sendMessage(chatId, formatWorkoutPreview(updated));
+            await bot.sendMessage(chatId, formatWorkoutPreview(updated), WORKOUT_PREVIEW_KB);
             setPendingState(chatId, { ...state, type: 'workout_confirm', workoutData: updated });
           } catch {
             await bot.sendMessage(chatId, '❌ Could not apply correction.');
@@ -829,12 +895,12 @@ function startBot() {
           if (!state.queuedMealMsg && earlyIntents.some(i => MEAL_SET.has(i))) {
             setPendingState(chatId, { ...state, queuedMealMsg: msg, queuedMealDayStart: userState.current_day_start });
           }
-          await bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData));
+          await bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData), WORKOUT_PREVIEW_KB);
           return;
         }
 
         // Unrecognised — show preview again
-        await bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData));
+        await bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData), WORKOUT_PREVIEW_KB);
         return;
       }
 
@@ -894,7 +960,7 @@ function startBot() {
           pendingStates.delete(chatId);
           const updated = await applyCorrection(bot, chatId, mealData, text);
           if (!updated) return;
-          await bot.sendMessage(chatId, formatPreview(updated));
+          await bot.sendMessage(chatId, formatPreview(updated), MEAL_PREVIEW_KB);
           setPendingState(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
           return;
         }
@@ -905,7 +971,7 @@ function startBot() {
           if (state.needsClarification) {
             // Show the preview so user sees what's being logged, then await final confirm
             setPendingState(chatId, { ...state, needsClarification: false });
-            await bot.sendMessage(chatId, formatPreview(mealData));
+            await bot.sendMessage(chatId, formatPreview(mealData), MEAL_PREVIEW_KB);
             return;
           }
           pendingStates.delete(chatId);
@@ -921,7 +987,7 @@ function startBot() {
         {
           const updated = await applyCorrection(bot, chatId, mealData, text);
           if (!updated) return;
-          await bot.sendMessage(chatId, formatPreview(updated));
+          await bot.sendMessage(chatId, formatPreview(updated), MEAL_PREVIEW_KB);
           setPendingState(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
         }
         return;
@@ -982,6 +1048,23 @@ function startBot() {
     } catch (err) {
       console.error('Unhandled message error:', err.message, err.stack);
       try { await bot.sendMessage(chatId, `❌ ${err.message || 'unknown error'}`); } catch {}
+    }
+  });
+
+  bot.on('callback_query', async (q) => {
+    const chatId = q.message?.chat?.id;
+    try {
+      if (!chatId || !q.data) return;
+      try { await bot.answerCallbackQuery(q.id); } catch {}
+      // remove the buttons from the tapped message so it can't be double-tapped
+      try { await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id }); } catch {}
+      const [kind, action] = q.data.split(':');
+      if (kind === 'mc')                         await mealButtonAction(bot, chatId, action);
+      else if (kind === 'wc')                    await workoutButtonAction(bot, chatId, action);
+      else if (kind === 'lw' && action === 'finish') await liveFinishAction(bot, chatId);
+    } catch (e) {
+      console.error('callback_query error:', e.message, e.stack);
+      try { if (chatId) await bot.sendMessage(chatId, `❌ ${e.message || 'button error'}`); } catch {}
     }
   });
 
@@ -1288,4 +1371,4 @@ async function sendHelp(bot, chatId) {
   );
 }
 
-module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal };
+module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal, mealButtonAction, workoutButtonAction, liveFinishAction };

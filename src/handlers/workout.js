@@ -1,6 +1,7 @@
 const claude = require('../claude');
 const db     = require('../db');
 const { calculateTDEE } = require('../utils/tdee');
+const { WORKOUT_PREVIEW_KB } = require('../utils/keyboards');
 const { getOffsetMs, requireTimezone } = require('../utils/time');
 
 // exerciseHistory: Map<normalizedName, {exercise, date, workoutName}>
@@ -280,7 +281,7 @@ async function showWorkoutPreview(bot, msg) {
     const data = await claude.parseWorkout(msg.text || msg.caption || '', knownCtx, userWeight);
     if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
     data.calories_burned = computeWorkoutCalories(chatId, data);
-    await bot.sendMessage(chatId, formatWorkoutPreview(data));
+    await bot.sendMessage(chatId, formatWorkoutPreview(data), WORKOUT_PREVIEW_KB);
     return data;
   } catch (err) {
     console.error('Workout preview error:', err.message, err.stack);

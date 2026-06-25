@@ -1,5 +1,6 @@
 const claude = require('../claude');
 const db     = require('../db');
+const { MEAL_PREVIEW_KB } = require('../utils/keyboards');
 const { getDayOfWeekTz, nowContextTz, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 
@@ -95,7 +96,7 @@ async function showMealPreview(bot, msg, photos) {
       return data;
     }
 
-    await bot.sendMessage(chatId, formatPreview(data));
+    await bot.sendMessage(chatId, formatPreview(data), MEAL_PREVIEW_KB);
     return data;
   } catch (err) {
     console.error('Meal preview error:', err.message, err.stack);
