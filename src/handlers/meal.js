@@ -29,11 +29,16 @@ function matchKnownMeal(caption, foods) {
     if (fw.size === msgSet.size || msg.length >= 2) cand.push({ f, id: _identity(fw) });
   }
   if (!cand.length) return null;
-  // Group by dish identity. One identity = same dish (auto-saved + menu copies collapse). Multiple
-  // identities = a genuine fork (Soba vs Sweet Potato, Regular vs Double) → ambiguous → AI.
-  if (new Set(cand.map(c => c.id)).size !== 1) return null;
-  // Same dish: prefer the canonical menu/seed entry over an auto-saved copy.
-  return (cand.find(c => /lunch|dinner|week/i.test(c.f.notes || '')) || cand[0]).f;
+  // Scope to TODAY'S menu when this is a menu reference: getKnownFoodsForDay already filtered day-tagged
+  // items to today, so day-tagged candidates ARE today's menu. Auto-saved copies (day-agnostic, possibly
+  // stale from another day) must not create false ambiguity against today's menu — drop them when a
+  // today-menu candidate exists. Pure repeat foods (no menu tag, e.g. a yogurt) are unaffected.
+  const isMenu = c => /lunch|dinner|week/i.test(c.f.notes || '');
+  const eff = cand.some(isMenu) ? cand.filter(isMenu) : cand;
+  // One dish identity = unambiguous → win. Multiple = a genuine fork (Soba vs Sweet Potato, Regular vs
+  // Double, or two different dishes on today's menu) → defer to the AI.
+  if (new Set(eff.map(c => c.id)).size !== 1) return null;
+  return (eff.find(isMenu) || eff[0]).f;
 }
 const { getDayOfWeekTz, nowContextTz, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
