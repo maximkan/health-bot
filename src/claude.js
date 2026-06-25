@@ -297,19 +297,33 @@ Return ONLY JSON:
 }`;
 }
 
-// Name a live-logged gym session from its exercise list (live flow has no free-text to parse).
-async function nameWorkout(exercises) {
-  try {
-    const list = (exercises || []).map(e => e?.name).filter(Boolean).join(', ');
-    if (!list) return 'Workout';
-    const resp = await anthropic.messages.create({
-      model: HAIKU, max_tokens: 16, temperature: 0,
-      system: `Name a gym session in 2-4 words from its exercises, by muscle focus: mostly squats/lunges/hinges -> "Leg Day"; mostly press/row/pulldown/shoulders/arms -> "Upper Body"; clearly push (presses, dips) -> "Push Day"; clearly pull (rows, pulldowns, curls) -> "Pull Day"; broad full-body mix -> "Full Body"; cardio + strength together -> "Mixed Strength & Cardio". Return ONLY the name, no quotes, no punctuation.`,
-      messages: [{ role: 'user', content: `Exercises: ${list}` }],
-    });
-    const name = resp.content[0].text.trim().replace(/^["']+|["']+$/g, '').slice(0, 40);
-    return name || 'Workout';
-  } catch { return 'Workout'; }
+// Name a live-logged gym session by muscle focus from its exercise list. Pure lookup — no LLM
+// (this used to be a Haiku call; the "prompt" was literally a keyword→label table).
+function nameWorkout(exercises) {
+  const names = (exercises || []).map(e => String(e?.name || '').toLowerCase()).filter(Boolean);
+  if (!names.length) return 'Workout';
+  const CARDIO = ['run','jog','treadmill','rowing','row machine','erg','bike','cycl','elliptical','swim','jump rope','skipping','sprint'];
+  const LEGS   = ['squat','lunge','deadlift','rdl','hinge','leg press','leg curl','leg extension','calf','hip thrust','glute','bulgarian','split squat','step up','goblet'];
+  const PUSH   = ['bench','chest press','chest fly','pec','push up','pushup','dip','overhead press','ohp','shoulder press','military','tricep','skull crusher','pushdown','lateral raise','front raise'];
+  const PULL   = ['row','pulldown','pull down','pull up','pullup','chin up','chinup','lat ','curl','face pull','shrug','rear delt'];
+  const CORE   = ['plank','crunch','sit up','situp','leg raise','russian twist','hanging'];
+  const cat = (n) =>
+    CARDIO.some(k => n.includes(k)) ? 'cardio' :
+    LEGS.some(k => n.includes(k))   ? 'legs'   :
+    PUSH.some(k => n.includes(k))   ? 'push'   :
+    PULL.some(k => n.includes(k))   ? 'pull'   :
+    CORE.some(k => n.includes(k))   ? 'core'   : 'other';
+  let legs = 0, push = 0, pull = 0, cardio = 0;
+  for (const n of names) { const c = cat(n); if (c === 'legs') legs++; else if (c === 'push') push++; else if (c === 'pull') pull++; else if (c === 'cardio') cardio++; }
+  const strength = legs + push + pull, upper = push + pull;
+  if (cardio > 0 && strength > 0)  return 'Mixed Strength & Cardio';
+  if (cardio > 0 && strength === 0) return 'Cardio';
+  if (legs > 0 && upper > 0)       return 'Full Body';
+  if (legs > 0)                    return 'Leg Day';
+  if (push > 0 && pull === 0)      return 'Push Day';
+  if (pull > 0 && push === 0)      return 'Pull Day';
+  if (upper > 0)                   return 'Upper Body';
+  return 'Workout';
 }
 
 function normalizeWorkoutExercises(data) {
@@ -697,7 +711,7 @@ What should be corrected? Return ONLY JSON:
   "details": "any other details"
 }`;
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 256, temperature: 0,
+    model: HAIKU, max_tokens: 256, temperature: 0,
     system: 'You parse correction instructions for a health tracking bot. Return only JSON.',
     messages: [{ role: 'user', content: prompt }],
   });
@@ -1353,7 +1367,7 @@ async function parseRenameIntent(text, recentLogs = []) {
 
 async function isConversationContinuation(newMessage, previousSummary) {
   const resp = await anthropic.messages.create({
-    model: SONNET, max_tokens: 5, temperature: 0,
+    model: HAIKU, max_tokens: 5, temperature: 0,
     system: `A user just sent a new message. You have a summary of their most recent conversation with a health coach.
 Reply YES only if the previous conversation provides direct, specific context that meaningfully changes how you'd answer the new message — for example, a recommendation you made, a problem they described, or a decision that was reached.
 Reply NO if the connection is only superficial (both mention food, both mention health) or if the previous conversation is on a clearly different topic.

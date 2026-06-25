@@ -4,6 +4,12 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-25
 
+### Cost/latency pass — batch 1 (B3 parsers→code, B6 model fixes)
+- **`nameWorkout` is now pure code, not an AI call.** Live-workout naming (Leg Day / Upper Body / Mixed Strength & Cardio / etc.) is a deterministic keyword lookup — instant, free, and verified to reproduce the AI's labels on real sessions (8/8). — `claude.js`
+- **Cheaper model for two helper calls:** `isConversationContinuation` (does this message continue the last chat?) and `parseCorrection` (what kind of correction is this?) moved from Sonnet → Haiku — same results, ~3–5× cheaper. — `claude.js`
+- **Proactive nudge skips the AI when there's nothing to flag.** The nudge prompt already returns "OK" when no item is flagged, so we now skip the Sonnet call entirely on those ticks (most of them). — `cron.js`
+- (Kept `recalculateTargets` on Sonnet — rare and high-stakes nutrition math; `parseSleepQuality` stays AI — it needs to tell a real rating from an incidental number like "had 4 eggs".)
+
 ### Systemic root-cause fixes
 - **Restarts no longer lose in-progress conversations (F1).** Pending states (meal confirm, morning quality, live workout, etc.) now persist to a `pending_states` DB table instead of an in-memory Map, so a deploy/restart mid-conversation doesn't drop the user's flow. — `db.js`, `bot.js`
 - **Eliminated intermittent "works then randomly fails" (F2).** Set `temperature: 0` on the 24 classifier/parser/guard calls (kept the creative coach/summary calls as-is), so the same input classifies consistently. — `claude.js`

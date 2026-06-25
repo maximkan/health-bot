@@ -307,6 +307,9 @@ async function runProactiveForUser(chatId, timeLabel) {
     };
 
     const dataBlock = buildProactiveDataBlock(recentData);
+    // Gate: the prompt returns "OK" (no nudge) whenever nothing is flagged, so skip the Sonnet
+    // call entirely when the block has no FLAG — most proactive ticks have nothing to flag.
+    if (!dataBlock.includes('FLAG')) return;
     const rawAlert = await claude.checkProactivePatterns(dataBlock, state);
     const alert = rawAlert ? require('./handlers/ask').stripMarkdown(rawAlert) : null;
     if (alert) {
