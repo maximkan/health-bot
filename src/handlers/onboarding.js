@@ -7,7 +7,7 @@ const S = {
   STATS: 6, TARGET_WEIGHT: 7, BODY_FAT: 8,
   ACTIVITY: 9, TRAINING: 10, TARGETS_CHOICE: 11,
   PLAN_CONFIRM: 12, TARGETS_INPUT: 13, COACHING_STYLE: 14,
-  SLEEP: 15, TIMEZONE: 16, GCAL: 17, DONE: 18,
+  SLEEP: 15, TIMEZONE: 16, REVIEW_DAY: 17, GCAL: 18, DONE: 19,
 };
 
 async function send(bot, chatId, text, language) {
@@ -290,16 +290,25 @@ async function handleOnboarding(bot, msg) {
       await bot.sendMessage(chatId, "Couldn't recognize that timezone. Try: 'GMT+8', 'New York', 'Kuala Lumpur', or your country name.");
       return;
     }
-    db.setState(chatId, { timezone: tz, onboard_step: S.GCAL });
+    db.setState(chatId, { timezone: tz, onboard_step: S.REVIEW_DAY });
+    await send(bot, chatId, `Set to ${tz} 🌍\n\nWhich day do you want your weekly check-in? I'll ask for your weight and send a review that morning.\n(e.g. Monday, Friday)`, lang);
+    return;
+  }
 
+  // ── Step 17: weekly review day ────────────────────────────────────────────
+  if (step === S.REVIEW_DAY) {
+    const parsed = await claude.parseOnboardingInput('review_day', text);
+    const dow = parsed?.dow ?? 1; // default Monday
+    db.setState(chatId, { weekly_review_dow: dow, onboard_step: S.GCAL });
+    const DOW_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
     const gcalUrl = `${config.gcalAuthUrl}/auth/gcal?user=${chatId}`;
     await send(bot, chatId,
-      `Set to ${tz} 🌍\n\nWant to connect Google Calendar? I'll sync your events automatically and remind you 30 min before each one.\n\nTap here to connect: ${gcalUrl}\n\nOr say "skip" to continue without it.`, lang
+      `${DOW_NAMES[dow]} it is 📅\n\nWant to connect Google Calendar? I'll sync your events automatically and remind you 30 min before each one.\n\nTap here to connect: ${gcalUrl}\n\nOr say "skip" to continue without it.`, lang
     );
     return;
   }
 
-  // ── Step 16: gcal ─────────────────────────────────────────────────────────
+  // ── Step 18: gcal ─────────────────────────────────────────────────────────
   if (step === S.GCAL) {
     const freshState = db.getState(chatId);
     const parsed = await claude.parseOnboardingInput('knows_targets', text); // reuse yes/no parser

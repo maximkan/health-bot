@@ -18,7 +18,15 @@ const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { nowContextTz, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
 const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
 
-const pendingStates = new Map();
+// DB-backed so in-flight conversation flows survive process restarts. Same .set/.get/.has/.delete
+// API as the old Map (better-sqlite3 is synchronous, so this is a drop-in). Code that MUTATES a
+// fetched state in place must call pendingStates.set(chatId, state) to persist (a DB read returns a copy).
+const pendingStates = {
+  set:    (chatId, state) => db.setPendingStateDb(chatId, state),
+  get:    (chatId)        => db.getPendingStateDb(chatId),
+  has:    (chatId)        => db.hasPendingStateDb(chatId),
+  delete: (chatId)        => db.deletePendingStateDb(chatId),
+};
 const mediaGroups   = new Map();
 
 const STATE_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -38,6 +46,7 @@ function bumpAttempts(chatId) {
   const s = pendingStates.get(chatId);
   if (!s) return 0;
   s._attempts = (s._attempts ?? 0) + 1;
+  pendingStates.set(chatId, s);
   return s._attempts;
 }
 
@@ -135,6 +144,8 @@ async function maybeTriggerCatchup(bot, chatId, wakeData) {
 // ── Intent dispatcher ─────────────────────────────────────────────────────────
 
 const LOG_CLOSE_INTENTS = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','BED']);
+// Log intents we re-route to the real logger if a coach-bound message turns out to be a log.
+const LOG_RECOVER_INTENTS = new Set(['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG']);
 
 async function dispatchIntents(bot, msg, chatId, userState, intents) {
   // Close any open coach chain when a log or bed intent arrives
@@ -185,6 +196,7 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
   const hasMeal  = intents.some(i => MEAL_SET.has(i));
 
   let workoutQueued = false; // track if we have a pending workout confirm
+  let askDone = false;       // coach-type intents all funnel to handleAsk — run it at most once
 
   for (const intent of nonMeal) {
     switch (intent) {
@@ -209,13 +221,70 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
       case 'PLAN_SKIP':      await handlePlanSkip(bot, msg);                       break;
       case 'CANCEL_REMINDER': await handleCancelReminder(bot, msg, chatId);        break;
       case 'UPDATE_TIMEZONE': await handleTimezoneChange(bot, msg, chatId);        break;
-      case 'UPDATE_TARGETS': await handleUpdateTargets(bot, msg, chatId);          break;
+      case 'UPDATE_TARGETS':  await handleUpdateTargets(bot, msg, chatId);         break;
+      case 'VACATION_START': {
+        const vState = db.getState(chatId);
+        if (vState.vacation_mode) {
+          await bot.sendMessage(chatId, 'Already in vacation mode. Say "vacation ended" when you\'re back.');
+          break;
+        }
+        const latestBodyForVacation = db.getLastBodyMeasurement(chatId);
+        db.setState(chatId, {
+          vacation_mode: 1,
+          vacation_start_ms: Date.now(),
+          vacation_start_weight: latestBodyForVacation?.weight_kg ?? null
+        });
+        await bot.sendMessage(chatId, 'Vacation mode on. 🏖 Logging still works if you want — totally optional. Say "vacation ended" when you\'re back.');
+        break;
+      }
+      case 'VACATION_END': {
+        const vState = db.getState(chatId);
+        await bot.sendChatAction(chatId, 'typing');
+        db.setState(chatId, {
+          vacation_mode: 0,
+          last_weekly_review_completed_at: vState.current_day_start || Date.now()
+        });
+        await bot.sendMessage(chatId, 'Welcome back. 💪 Back to normal tracking.');
+        if (vState.vacation_start_ms) {
+          try {
+            const vacData = db.getWeekDataFromSQLite(chatId, vState.vacation_start_ms);
+            const targets = db.getTargets(chatId);
+            const durationDays = Math.round((Date.now() - vState.vacation_start_ms) / 86400000);
+            const summary = await claude.generateVacationSummary(vacData, targets, {
+              durationDays,
+              startWeight: vState.vacation_start_weight,
+              currentWeight: vacData.latestBody?.weight_kg ?? null
+            });
+            if (summary) await bot.sendMessage(chatId, summary);
+            db.setState(chatId, { vacation_start_ms: null, vacation_start_weight: null });
+          } catch (err) { console.error('Vacation summary error:', err.message); }
+        }
+        break;
+      }
       case 'WAKE':
         if (userState.status === 'sleeping') break; // handled by wake flow
-        // deliberate fall-through
+        if (!askDone) { await handleAsk(bot, msg, '', intents); askDone = true; }
+        break;
       case 'FULL_ANALYSIS':
+        if (!askDone) { await handleAsk(bot, msg, '', intents); askDone = true; }
+        break;
       case 'COACH_QUESTION':
-      case 'GENERAL':       await handleAsk(bot, msg, '', intents);  break;
+      case 'GENERAL': {
+        if (askDone) break; // already answered (e.g. FULL_ANALYSIS in the same message)
+        // Recover a real log that history-poisoning or a reply-gesture pushed into the coach:
+        // re-classify WITHOUT history. If it's actually a log, hand it to the logger instead of
+        // letting the coach fake an estimate/confirmation. _logRecovered guards against re-entry.
+        if (msg.text && !msg._logRecovered) {
+          const fresh = await claude.classify(msg.text, []).catch(() => []);
+          if (fresh.some(i => LOG_RECOVER_INTENTS.has(i))) {
+            await dispatchIntents(bot, { ...msg, _logRecovered: true }, chatId, db.getState(chatId), fresh);
+            break;
+          }
+        }
+        await handleAsk(bot, msg, '', intents);
+        askDone = true;
+        break;
+      }
     }
   }
 
@@ -352,7 +421,7 @@ function startBot() {
           } catch { finalText = text; }
         }
       }
-      db.saveHistory(chatId, 'assistant', finalText);
+      if (!finalText.startsWith('❌')) db.saveHistory(chatId, 'assistant', finalText);
     }
     return await _origSend(chatId, finalText, opts);
   };
@@ -393,8 +462,13 @@ function startBot() {
       }
 
       if (repState.last_coach_message_id && repliedMsgId === repState.last_coach_message_id) {
-        await handleCoachReply(bot, msg, repState.last_coach_message_id);
-        return;
+        // If the reply is actually a log (e.g. replying to a bot message with "had a burger"),
+        // don't bury it in the coach — fall through to normal routing + the dispatch recovery.
+        const replyFresh = text ? await claude.classify(text, []).catch(() => []) : [];
+        if (!replyFresh.some(i => LOG_RECOVER_INTENTS.has(i))) {
+          await handleCoachReply(bot, msg, repState.last_coach_message_id);
+          return;
+        }
       }
     }
 
@@ -421,14 +495,19 @@ function startBot() {
     if (msg.text) {
       await bot.sendChatAction(chatId, 'typing');
       // RENAME is classified without history — history can get poisoned by past failed attempts
-      const renameCheck = await claude.classify(msg.text, []).catch(() => []);
-      if (renameCheck.includes('RENAME')) {
-        await handleRename(bot, msg, chatId);
-        return;
+      // Skip RENAME check if we're in the middle of a meal flow — user is clarifying/confirming, not renaming
+      const mealFlowTypes = new Set(['meal_confirm', 'meal_text_clarification', 'meal_photo_clarification']);
+      const inMealFlow = mealFlowTypes.has(pendingStates.get(chatId)?.type);
+      if (!inMealFlow) {
+        const renameCheck = await claude.classify(msg.text, []).catch(() => []);
+        if (renameCheck.includes('RENAME')) {
+          await handleRename(bot, msg, chatId);
+          return;
+        }
       }
       const history = db.getHistory(chatId, 10);
       try { earlyIntents = await claude.classify(msg.text, history); } catch {}
-      if (earlyIntents.includes('RENAME')) {
+      if (!inMealFlow && earlyIntents.includes('RENAME')) {
         await handleRename(bot, msg, chatId);
         return;
       }
@@ -467,7 +546,10 @@ function startBot() {
           if (earlyIntents.some(i => LOG_INTENTS.includes(i))) {
             pendingStates.delete(chatId);
             await routeMessage(bot, msg, chatId, db.getState(chatId), earlyIntents);
-            setPendingState(chatId, { type: 'bed_plans', pushback_sent: true });
+            // Only re-set bed_plans if routeMessage didn't set its own pending state (e.g. meal_confirm)
+            if (!pendingStates.has(chatId)) {
+              setPendingState(chatId, { type: 'bed_plans', pushback_sent: true });
+            }
             return;
           }
 
@@ -481,6 +563,7 @@ function startBot() {
 
           if (isDone && !state.pushback_sent) {
             state.pushback_sent = true;
+            pendingStates.set(chatId, state);
             await bot.sendMessage(chatId, "really? no gym? no tasks? think about it.");
             return;
           }
@@ -505,15 +588,34 @@ function startBot() {
       }
     }
 
+    // ── Retroactive / late sleep-quality capture ──────────────────────────────
+    // If today's sleep is still awaiting a rating (marker set at wake, lives in the DB so
+    // it survives restarts) and no other flow is active, a 1-5 fills it in — any time, any
+    // phrasing ("4", "my sleep quality today is 4", "5/5", "rough, a 2").
+    if (msg.text && !isWake && !pendingStates.has(chatId) && /\b[1-5]\b/.test(msg.text)) {
+      const freshState = db.getState(chatId);
+      if (freshState.open_sleep_log_id) {
+        const q = await claude.parseSleepQuality(msg.text).catch(() => null);
+        if (q) {
+          db.setSleepQuality(chatId, q);
+          await bot.sendMessage(chatId, `✅ sleep quality ${q}/5 logged.`);
+          return;
+        }
+      }
+    }
+
     // ── Wake detection ────────────────────────────────────────────────────────
     if (isWake && (userState.status === 'sleeping' || userState.status === 'awake')) {
       pendingStates.delete(chatId);
-      const isMonday = new Date(Date.now() + getOffsetMs(userState.timezone)).getUTCDay() === 1;
-      db.setState(chatId, { bed_nudge_sent: 0, weekly_waiting_weight: isMonday ? 1 : 0 });
-      const rawWakeOverride = extractTimeMs(msg.text, userState.timezone);
+      const reviewDow = userState.weekly_review_dow ?? 1;
+      const isReviewDay = !userState.vacation_mode && new Date(Date.now() + getOffsetMs(userState.timezone)).getUTCDay() === reviewDow;
+      db.setState(chatId, { bed_nudge_sent: 0, weekly_waiting_weight: isReviewDay ? 1 : 0 });
+      // allowBareHour so "gm, woke up 9" extracts 09:00 instead of falling back to message-receipt time
+      const rawWakeOverride = extractTimeMs(msg.text, userState.timezone, { allowBareHour: true });
       const wakeOverride = (rawWakeOverride && rawWakeOverride <= Date.now()) ? rawWakeOverride : null;
       const wakeData = await day.handleMorningWake(bot, chatId, userState, wakeOverride);
       setPendingState(chatId, { type: 'morning_quality', wakeData, pendingMsg: msg, pendingIntents: earlyIntents });
+      cronSvc.scheduleSleepQualityReminderForUser(chatId, wakeData.newDayStart);
       return;
     }
 
@@ -564,7 +666,9 @@ function startBot() {
         cronSvc.scheduleUntimedRemindersForUser(chatId, state.wakeData.newDayStart);
         const curStateAfter = db.getState(chatId);
         if (curStateAfter.weekly_waiting_weight) {
-          await bot.sendMessage(chatId, '📋 it\'s monday — log your weight + body fat for the weekly review.');
+          const DOW_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+          const reviewDowName = DOW_NAMES[curStateAfter.weekly_review_dow ?? 1];
+          await bot.sendMessage(chatId, `📋 it's ${reviewDowName} — log your weight + body fat for the weekly review.`);
           scheduleWeeklyReminders(bot, chatId);
         }
         const LOG_TYPES = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','PLAN'];
@@ -596,7 +700,9 @@ function startBot() {
         cronSvc.scheduleUntimedRemindersForUser(chatId, wakeData.newDayStart);
         const curStateAfter = db.getState(chatId);
         if (curStateAfter.weekly_waiting_weight) {
-          await bot.sendMessage(chatId, '📋 it\'s monday — log your weight + body fat for the weekly review.');
+          const DOW_NAMES = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+          const reviewDowName = DOW_NAMES[curStateAfter.weekly_review_dow ?? 1];
+          await bot.sendMessage(chatId, `📋 it's ${reviewDowName} — log your weight + body fat for the weekly review.`);
           scheduleWeeklyReminders(bot, chatId);
         }
         const LOG_TYPES = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','RECOVERY_LOG','SLEEP_LOG','WEIGHT_LOG','PLAN'];
@@ -634,8 +740,9 @@ function startBot() {
         if (isDone) {
           pendingStates.delete(chatId);
           const durationMin = Math.round((Date.now() - state.startTime) / 60000);
+          const workoutName = await claude.nameWorkout(state.exercises);
           const workoutData = {
-            workout_name: 'Gym',
+            workout_name: workoutName,
             activity_type: 'weights',
             duration_min: durationMin || null,
             exercises: state.exercises,
@@ -654,6 +761,7 @@ function startBot() {
           if (parsed?.name) {
             state.exercises.push(parsed);
             state._createdAt = Date.now();
+            pendingStates.set(chatId, state);
             const line = formatExerciseLine(parsed).trim();
             await bot.sendMessage(chatId, `${line} ✅\nnext exercise, or 'finished' to wrap up`);
           } else {
@@ -773,20 +881,11 @@ function startBot() {
 
         const isCorrectionIntent = earlyIntents.some(i => ['MEAL_LOG','DRINK_LOG','CORRECTION'].includes(i));
 
-        const isConfirmed = await claude.isConfirmIntent(text);
-        if (isConfirmed && !isCorrectionIntent) {
-          if (state.needsClarification) {
-            // Show the preview so user sees what's being logged, then await final confirm
-            setPendingState(chatId, { ...state, needsClarification: false });
-            await bot.sendMessage(chatId, formatPreview(mealData));
-            return;
-          }
-          pendingStates.delete(chatId);
-          await logMeal(bot, chatId, mealData, state.dayStart);
-          if (state.catchupRetro) {
-            await bot.sendMessage(chatId, 'anything else? (or done)');
-            setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro });
-          }
+        // Question while reviewing → answer it, keep the preview pending. Checked BEFORE the confirm
+        // guard because isConfirmIntent can false-positive on a question with a declarative tail
+        // ("why do you show X? it's actually Y") and silently log instead of answering.
+        if (earlyIntents.includes('COACH_QUESTION') && !isCorrectionIntent) {
+          await handleAsk(bot, msg, `Meal being reviewed:\n${formatPreview(mealData)}`, earlyIntents);
           return;
         }
 
@@ -800,9 +899,21 @@ function startBot() {
           return;
         }
 
-        // Question → answer with meal context, keep pending state so next reply still confirms/cancels
-        if (earlyIntents.includes('COACH_QUESTION')) {
-          await handleAsk(bot, msg, `Meal being reviewed:\n${formatPreview(mealData)}`, earlyIntents);
+        // Confirm → log
+        const isConfirmed = await claude.isConfirmIntent(text);
+        if (isConfirmed) {
+          if (state.needsClarification) {
+            // Show the preview so user sees what's being logged, then await final confirm
+            setPendingState(chatId, { ...state, needsClarification: false });
+            await bot.sendMessage(chatId, formatPreview(mealData));
+            return;
+          }
+          pendingStates.delete(chatId);
+          await logMeal(bot, chatId, mealData, state.dayStart);
+          if (state.catchupRetro) {
+            await bot.sendMessage(chatId, 'anything else? (or done)');
+            setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro });
+          }
           return;
         }
 
@@ -1033,7 +1144,9 @@ function checkAdaptiveTargetProposal(chatId) {
   const dailyBalance  = tdee - targets.calories;
   const expectedRate  = -(dailyBalance * 7) / 7700;
   const drift = weeklyRate - expectedRate;
-  if (Math.abs(drift) < 0.2) return null;
+  // Noise floor: with sparse weigh-ins, day-to-day water weight easily fakes a ~0.2kg/wk drift.
+  // Require a more meaningful sustained gap before proposing a calorie re-tune.
+  if (Math.abs(drift) < 0.35) return null;
 
   const absDrift  = Math.abs(drift);
   const step      = absDrift >= 0.7 ? 250 : absDrift >= 0.4 ? 200 : 100;
@@ -1045,6 +1158,10 @@ function checkAdaptiveTargetProposal(chatId) {
   const maxCal = tdee + 500;
   const proposedCalories = Math.max(minCal, Math.min(maxCal, targets.calories + adjustment));
   if (proposedCalories === targets.calories) return null;
+  // The safe floor/ceiling can flip the intended direction (e.g. the current target is already below
+  // the BMR floor) — never emit a self-contradictory "you're losing too slow, so eat MORE" proposal.
+  const realDelta = proposedCalories - targets.calories;
+  if (Math.sign(realDelta) !== Math.sign(adjustment)) return null;
 
   const protein = targets.protein;
   const fat     = targets.fat;
@@ -1056,7 +1173,7 @@ function checkAdaptiveTargetProposal(chatId) {
     currentCalories: targets.calories,
     proposedCalories,
     protein, carbs, fat,
-    adjustment,
+    adjustment: realDelta, // the ACTUAL applied change (post-clamp), so the message label matches the number
     recentWeights: logs.slice(-3).map(l => l.weight_kg),
   };
 }
@@ -1088,6 +1205,7 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
     db.setState(chatId, {
       last_coach_message_id: sent.message_id,
       last_coach_context: JSON.stringify({ message: review, context: '', timestamp: Date.now() }),
+      last_weekly_review_completed_at: state.current_day_start || Date.now()
     });
     db.saveCoachMessage(chatId, 'assistant', review, sent.message_id);
     // If review suggested target changes, flag so next reply can apply them
@@ -1101,7 +1219,12 @@ async function handleWeeklyReviewFlow(bot, msg, chatId) {
       if (recentWorkouts.length >= 2) {
         const state = db.getState(chatId);
         const { buildStrengthSummaryBlock } = require('./handlers/workout');
-        const strengthBlock = buildStrengthSummaryBlock(recentWorkouts);
+        // Align "this week" to the SAME set the main review used, so the counts can't disagree.
+        const thisWeekIds = new Set((weekData.workouts || []).map(w => w.id));
+        const reviewedWeekStartMs = (weekData.workouts || []).reduce(
+          (min, w) => (w.day_start != null && (min == null || w.day_start < min)) ? w.day_start : min, null
+        ) ?? ((state.current_day_start || Date.now()) - 7 * 86400000);
+        const strengthBlock = buildStrengthSummaryBlock(recentWorkouts, thisWeekIds, reviewedWeekStartMs);
         const strengthSummary = await claude.generateWeeklyStrengthSummary(strengthBlock, state);
         if (strengthSummary) await bot.sendMessage(chatId, strengthSummary);
       }
@@ -1165,4 +1288,4 @@ async function sendHelp(bot, chatId) {
   );
 }
 
-module.exports = { startBot };
+module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal };

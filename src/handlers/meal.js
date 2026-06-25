@@ -20,13 +20,13 @@ function formatPreview(data) {
   return lines.join('\n');
 }
 
-function progressBar(actual, target, width = 10) {
+function progressBar(actual, target, width = 6) {
   const fill = Math.min(width, Math.max(0, Math.round((actual / target) * width)));
   return '█'.repeat(fill) + '░'.repeat(width - fill);
 }
 
-function remainLabel(left, unit) {
-  return left >= 0 ? `${left}${unit} left` : `${Math.abs(left)}${unit} over ⚠️`;
+function remainLabel(left, unit, warn = true) {
+  return left >= 0 ? `${left}${unit} left` : `${Math.abs(left)}${unit} over${warn ? ' ⚠️' : ''}`;
 }
 
 function formatConfirmation(data, totals, targets) {
@@ -45,7 +45,7 @@ function formatConfirmation(data, totals, targets) {
     const fat  = Math.round(totals.fat      ?? 0);
     lines.push('');
     lines.push(`kcal ${progressBar(cal,  T.calories)} ${cal} / ${T.calories}   ${remainLabel(T.calories - cal,  '')}`);
-    lines.push(`P    ${progressBar(prot, T.protein)}  ${prot} / ${T.protein}g  ${remainLabel(T.protein - prot, 'g')}`);
+    lines.push(`P    ${progressBar(prot, T.protein)}  ${prot} / ${T.protein}g  ${remainLabel(T.protein - prot, 'g', false)}`);
     lines.push(`C    ${progressBar(carb, T.carbs)}  ${carb} / ${T.carbs}g  ${remainLabel(T.carbs - carb, 'g')}`);
     lines.push(`F    ${progressBar(fat,  T.fat)}  ${fat} / ${T.fat}g  ${remainLabel(T.fat - fat, 'g')}`);
   }
@@ -76,7 +76,18 @@ async function showMealPreview(bot, msg, photos) {
       if (lastBot) captionWithCtx = `${caption}\n\n[Recent coach context: ${lastBot.content.slice(0, 300)}]`;
     }
 
-    const data = await claude.analyzeMeal(photoList, captionWithCtx, dayOfWeek, knownFoodsCtx, nowContextTz(tz), institutionKeywords);
+    let data;
+    try {
+      data = await claude.analyzeMeal(photoList, captionWithCtx, dayOfWeek, knownFoodsCtx, nowContextTz(tz), institutionKeywords);
+    } catch (err) {
+      if (err.status === 529 || err.message?.startsWith('529')) {
+        await new Promise(r => setTimeout(r, 8000));
+        await bot.sendChatAction(chatId, 'typing');
+        data = await claude.analyzeMeal(photoList, captionWithCtx, dayOfWeek, knownFoodsCtx, nowContextTz(tz), institutionKeywords);
+      } else {
+        throw err;
+      }
+    }
 
     if (data.confidence === 'low' && data.clarification) {
       await bot.sendMessage(chatId, `🤔 ${data.clarification}`);
@@ -88,7 +99,8 @@ async function showMealPreview(bot, msg, photos) {
     return data;
   } catch (err) {
     console.error('Meal preview error:', err.message, err.stack);
-    await bot.sendMessage(chatId, `❌ ${err.message}`);
+    const msg529 = err.status === 529 || err.message?.startsWith('529');
+    await bot.sendMessage(chatId, msg529 ? "API is overloaded right now, try again in a moment." : `❌ ${err.message}`);
     return null;
   }
 }

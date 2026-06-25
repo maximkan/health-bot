@@ -19,7 +19,10 @@ async function handleCorrection(bot, msg, chatId, userState) {
     if (correction.action === 'update_time' && correction.new_time) {
       await applyTimeCorrection(bot, chatId, userState, { entry_type: correction.entry_type, description: correction.description, new_time: correction.new_time });
     } else {
-      await bot.sendMessage(chatId, `❌ I can update log times for now. Try: "change time of my lunch to 2pm"`);
+      // Not a log-time edit (e.g. a date/calendar statement that got misrouted here) —
+      // hand it to the coach instead of dead-ending on "I can update log times".
+      const { handleAsk } = require('./ask');
+      await handleAsk(bot, msg, '', ['COACH_QUESTION']);
     }
   } catch (err) {
     console.error('Correction error:', err.message);

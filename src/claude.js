@@ -32,7 +32,7 @@ Intents:
 - PLAN: creating a plan, reminder, event, scheduling something
 - PLAN_DONE: confirming a task is done
 - PLAN_SKIP: skipping or postponing a plan
-- CORRECTION: changing/fixing a previous log entry (time, values, etc.)
+- CORRECTION: editing a value or time on the user's OWN previously logged entry (meal/workout/etc). NOT for statements of fact about the date, calendar, day of week, or correcting the bot's knowledge — those are COACH_QUESTION.
 - DELETE: deleting/removing a log entry ("delete my chicken rice", "remove today's lunch", "delete that workout")
 - UPDATE_TARGETS: explicitly setting nutrition targets to specific numbers ("change calorie target to 1800", "set protein to 200g", "update my macros to 1800/180/100/60", "yes update them", "yes do it", "apply those targets"). NOT for asking advice about targets or vague requests like "maybe we should change targets".
 - CANCEL_REMINDER: cancel/turn off a reminder for a plan WITHOUT cancelling the plan ("не надо напоминать", "cancel the reminder", "don't remind me", "отмени напоминание", "no reminder needed")
@@ -54,7 +54,16 @@ Return ALL intents that apply. Examples:
 "gym tomorrow at 10am" → ["PLAN"]
 "cancel" → ["GENERAL"]
 "nevermind" → ["GENERAL"]
+"vacation started" → ["VACATION_START"]
+"going on holiday" → ["VACATION_START"]
+"vacation mode on" → ["VACATION_START"]
+"vacation ended" → ["VACATION_END"]
+"back from vacation" → ["VACATION_END"]
+"vacation mode off" → ["VACATION_END"]
 "change my lunch to 2pm" → ["CORRECTION"]
+"Monday was jun 8" → ["COACH_QUESTION"]
+"no, today is saturday june 13" → ["COACH_QUESTION"]
+"that's wrong, this week started on the 8th" → ["COACH_QUESTION"]
 "maybe we should adjust my targets" → ["COACH_QUESTION"]
 "i keep going over calories, can you suggest new targets?" → ["COACH_QUESTION"]
 "yes update the targets to what you suggested" → ["UPDATE_TARGETS"]
@@ -79,7 +88,7 @@ async function classify(text, history = []) {
       content = `[Recent conversation:\n${ctx}\n]\n\nClassify this message: ${text}`;
     }
     const response = await anthropic.messages.create({
-      model: HAIKU, max_tokens: 60, system: CLASSIFIER_SYSTEM,
+      model: HAIKU, max_tokens: 60, temperature: 0, system: CLASSIFIER_SYSTEM,
       messages: [{ role: 'user', content }],
     });
     const match = response.content[0].text.match(/\[[\s\S]*?\]/);
@@ -100,7 +109,7 @@ async function matchPlanToModify(userText, plans) {
   if (plans.length === 1) return plans[0];
   const list = plans.map((p, i) => `${i + 1}. ${p.plan_text}${p.plan_date ? ' on ' + p.plan_date : ''}${p.plan_time ? ' at ' + p.plan_time : ''}`).join('\n');
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 10,
+    model: HAIKU, max_tokens: 10, temperature: 0,
     system: 'Given a user message about a plan and a numbered list of plans, reply ONLY with the number of the best match, or 0 if none clearly match.',
     messages: [{ role: 'user', content: `Message: "${userText}"\n\nPlans:\n${list}` }],
   });
@@ -113,7 +122,7 @@ async function matchPlanToModify(userText, plans) {
 async function matchEntryToDelete(userText, entries) {
   const list = entries.map((e, i) => `${i + 1}. [${e.label}] ${e.title}${e.extra ? ' — ' + e.extra : ''}`).join('\n');
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 10,
+    model: HAIKU, max_tokens: 10, temperature: 0,
     system: 'Given a deletion request and a numbered list of log entries (ordered oldest first, newest last), reply ONLY with the number of the best match, or 0 if none clearly match.',
     messages: [{ role: 'user', content: `Request: "${userText}"\n\nEntries:\n${list}` }],
   });
@@ -190,7 +199,7 @@ async function analyzeMeal(photoBase64OrArray, caption, dayOfWeek, knownFoodsCon
   content.push({ type: 'text', text });
 
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 2048, system: MEAL_SYSTEM,
+    model: SONNET, max_tokens: 2048, temperature: 0, system: MEAL_SYSTEM,
     messages: [{ role: 'user', content }],
   });
   const parsed = parseJSON(response.content[0].text);
@@ -225,7 +234,7 @@ CIRCUIT ROUNDS: If the workout lists exercises under labeled rounds (Round 1, Ro
 
 TIMED INTERVALS: "4×30s" or "4 sets of 30 seconds":
 - Use "duration_sec": 30, "sets": 4 — omit reps entirely
-- For distance-based cardio ("250m rowing"): use "distance_m": 250 — omit reps
+- For distance-based cardio ("250m rowing"): use "distance_m": 250 — omit reps. ALWAYS convert to meters: 1km = 1000m, 1 mile = 1609m ("ran 1km" → distance_m: 1000)
 - These still get a "round" field if part of a round
 - DURATION: always add interval round time on top of stated circuit time. Calculate: sets × (work_sec + rest_sec) / 60 per exercise, sum all interval exercises. Example: Round 4 has 4×30s rowing (30s rest) + 4×30s ski erg (30s rest) → 4×60/60 + 4×60/60 = 4+4 = 8 min extra. If user said "12 min for rounds 1-3", total duration_min = 12 + 8 = 20.
 
@@ -236,14 +245,38 @@ If duration is not stated, ESTIMATE from exercises:
 - Never leave calories_burned null when exercises are present
 
 SETS/REPS RULES:
-- "3x10" → sets=3, reps=10
-- "60 deadlifts" (no sets) → sets=1, reps=60
+- Uniform: "3x10" → {sets: 3, reps: 10}
+- Single big set: "60 deadlifts" → {sets: 1, reps: 60}
 - "30 each leg" → reps=30 (the stated per-side number)
-- For timed/distance exercises, omit reps — use duration_sec or distance_m instead
+- Timed/distance: omit reps — use duration_sec or distance_m instead
+
+VARYING REPS OR WEIGHTS WITHIN ONE EXERCISE — use "sets_detail":
+When the user lists multiple set-groups for the same exercise (different reps and/or different weights), emit ONE exercise entry with a "sets_detail" array. NEVER repeat the same exercise as multiple top-level entries. NEVER put "reps" as a comma-separated string.
+Examples (these are the format users actually type — match them precisely):
+  "Push ups
+   1 x 20
+   4 x 10"
+  → {"name": "Push Ups", "sets_detail": [{"sets":1,"reps":20}, {"sets":4,"reps":10}]}
+
+  "Ez bar curls
+   1 x 15 x 20kg
+   3 x 10 x 20 kg
+   1 x 5 x 20 kg"
+  → {"name": "Ez Bar Curls", "sets_detail": [{"sets":1,"reps":15,"weight_kg":20}, {"sets":3,"reps":10,"weight_kg":20}, {"sets":1,"reps":5,"weight_kg":20}]}
+
+  "Push Ups 5×20,10,10,10,10"  (comma-list = 5 separate sets with those reps)
+  → {"name": "Push Ups", "sets_detail": [{"sets":1,"reps":20}, {"sets":1,"reps":10}, {"sets":1,"reps":10}, {"sets":1,"reps":10}, {"sets":1,"reps":10}]}
+
+When using sets_detail: omit the flat "sets", "reps", "weight_kg" on that exercise. weight_kg goes inside each sets_detail entry (null/omitted for bodyweight).
 
 If Known Custom Exercises are provided, use their typical values as defaults.
 
 Time parsing: extract START time if mentioned ("8am" → "08:00", "8 to 10am" → "08:00"). 24h format. Omit if none.
+
+WORKOUT NAMING (workout_name) — name the session by what it ACTUALLY is, never a bare "Gym":
+- If the user named a specific activity (golf, driving range, tennis, swim, run, hike, yoga), use that exact activity ("Golf - Driving Range", "Tennis").
+- For a strength session, name it by the muscle focus from the exercises: mostly squats/lunges/hinges → "Leg Day"; mostly press/row/pulldown/shoulders → "Upper Body"; a clear push set → "Push Day"; a clear pull set → "Pull Day"; a broad mix → "Full Body"; cardio + strength together → "Mixed Strength & Cardio".
+- Only fall back to "Workout" if there is genuinely no activity or exercise detail. Never output just "Gym".
 
 Return ONLY JSON:
 {
@@ -264,22 +297,66 @@ Return ONLY JSON:
 }`;
 }
 
+// Name a live-logged gym session from its exercise list (live flow has no free-text to parse).
+async function nameWorkout(exercises) {
+  try {
+    const list = (exercises || []).map(e => e?.name).filter(Boolean).join(', ');
+    if (!list) return 'Workout';
+    const resp = await anthropic.messages.create({
+      model: HAIKU, max_tokens: 16, temperature: 0,
+      system: `Name a gym session in 2-4 words from its exercises, by muscle focus: mostly squats/lunges/hinges -> "Leg Day"; mostly press/row/pulldown/shoulders/arms -> "Upper Body"; clearly push (presses, dips) -> "Push Day"; clearly pull (rows, pulldowns, curls) -> "Pull Day"; broad full-body mix -> "Full Body"; cardio + strength together -> "Mixed Strength & Cardio". Return ONLY the name, no quotes, no punctuation.`,
+      messages: [{ role: 'user', content: `Exercises: ${list}` }],
+    });
+    const name = resp.content[0].text.trim().replace(/^["']+|["']+$/g, '').slice(0, 40);
+    return name || 'Workout';
+  } catch { return 'Workout'; }
+}
+
+function normalizeWorkoutExercises(data) {
+  if (!Array.isArray(data?.exercises)) return data;
+  for (const e of data.exercises) {
+    // Salvage any improvised distance_km into the canonical distance_m (× 1000) so it displays
+    if (e.distance_km != null && e.distance_m == null) {
+      e.distance_m = Math.round(e.distance_km * 1000);
+      delete e.distance_km;
+    }
+    // Salvage: "20,10,10,10,10" string reps → sets_detail
+    if (typeof e.reps === 'string' && e.reps.includes(',')) {
+      const parts = e.reps.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+      if (parts.length > 1) {
+        e.sets_detail = parts.map(r => {
+          const d = { sets: 1, reps: r };
+          if (e.weight_kg != null) d.weight_kg = e.weight_kg;
+          return d;
+        });
+        delete e.reps; delete e.sets; delete e.weight_kg;
+      }
+    }
+    // Coerce numeric-string reps to number
+    if (typeof e.reps === 'string') {
+      const n = parseInt(e.reps, 10);
+      if (!isNaN(n)) e.reps = n;
+    }
+  }
+  return data;
+}
+
 async function parseWorkout(text, knownExercisesCtx = '', weight_kg) {
   let content = text;
   if (knownExercisesCtx) content = `Known Custom Exercises:\n${knownExercisesCtx}\n\nWorkout: ${text}`;
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 1024, system: buildWorkoutSystem(weight_kg),
+    model: HAIKU, max_tokens: 1024, temperature: 0, system: buildWorkoutSystem(weight_kg),
     messages: [{ role: 'user', content }],
   });
   const parsed = parseJSON(response.content[0].text);
   if (!parsed) throw new Error(`Could not parse workout: ${response.content[0].text}`);
-  return parsed;
+  return normalizeWorkoutExercises(parsed);
 }
 
 async function applyWorkoutCorrection(existingData, correction) {
   const prompt = `Current workout data:\n${JSON.stringify(existingData, null, 2)}\n\nUser correction: "${correction}"\n\nApply the correction:\n- If user says exercises were missed/skipped, ADD them to the exercises array\n- If user changes duration/intensity, recalculate calories_burned\n- Only modify what was mentioned\nReturn the complete updated JSON with same structure.`;
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 1024,
+    model: SONNET, max_tokens: 1024, temperature: 0,
     system: 'You are a workout data editor. Apply corrections to workout JSON precisely. Return only valid JSON with same structure.',
     messages: [{ role: 'user', content: prompt }],
   });
@@ -306,14 +383,28 @@ Return ONLY JSON:
 For uniform weight (e.g. "bench press 3x10 100kg"), return a single sets_detail entry:
 {"sets_detail": [{"sets": 3, "reps": 10, "weight_kg": 100}]}
 
+CARDIO / DISTANCE / TIMED exercises (running, rowing, cycling, swimming, ski erg, plank, etc.) — NO sets_detail, NO reps, NO weight:
+- Distance: return {"name": "Run", "distance_m": <meters>}. ALWAYS convert to meters: 1km = 1000m, 1 mile = 1609m, "1.5k" = 1500m.
+  "run 1km" → {"name": "Run", "distance_m": 1000}
+  "1000m run" → {"name": "Run", "distance_m": 1000}
+  "rowed 500m" → {"name": "Rowing", "distance_m": 500}
+- Timed: return {"name": "Plank", "duration_sec": <seconds>, "sets": <n if repeated, else omit>}.
+  "plank 60s" → {"name": "Plank", "duration_sec": 60}
+
 weight_kg: null if bodyweight. reps: total reps if no sets specified.`;
 
 async function parseLiveExercise(text) {
   const resp = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 256, system: LIVE_EXERCISE_SYSTEM,
+    model: HAIKU, max_tokens: 256, temperature: 0, system: LIVE_EXERCISE_SYSTEM,
     messages: [{ role: 'user', content: text }],
   });
-  return parseJSON(resp.content[0].text);
+  const e = parseJSON(resp.content[0].text);
+  // Salvage any improvised distance_km → canonical distance_m so it logs and displays
+  if (e && e.distance_km != null && e.distance_m == null) {
+    e.distance_m = Math.round(e.distance_km * 1000);
+    delete e.distance_km;
+  }
+  return e;
 }
 
 // ── Workout comparison ────────────────────────────────────────────────────────
@@ -415,7 +506,7 @@ Return ONLY a JSON array:
 
 async function parseRecovery(text) {
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 512, system: RECOVERY_SYSTEM,
+    model: HAIKU, max_tokens: 512, temperature: 0, system: RECOVERY_SYSTEM,
     messages: [{ role: 'user', content: text }],
   });
   const parsed = parseJSON(response.content[0].text);
@@ -439,12 +530,32 @@ Nap example — "nap from 4 to 5pm":
 
 async function parseSleep(text) {
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 256, system: SLEEP_SYSTEM,
+    model: HAIKU, max_tokens: 256, temperature: 0, system: SLEEP_SYSTEM,
     messages: [{ role: 'user', content: text }],
   });
   const parsed = parseJSON(response.content[0].text);
   if (!parsed) throw new Error(`Could not parse sleep: ${response.content[0].text}`);
   return parsed;
+}
+
+// ── Sleep quality rating (retroactive / late capture) ─────────────────────────
+
+const SLEEP_QUALITY_SYSTEM = `The user may be rating last night's sleep quality on a 1-5 scale. Extract that rating.
+Accept: bare numbers ("4"), "X/5" ("5/5"), "like a 3", "quality was 4", "my sleep quality today is 4", "slept ok, a 3".
+Map an obvious word-only rating to a number only if unambiguous (terrible/awful=1, poor/bad=2, ok/fine=3, good=4, great/amazing=5).
+Do NOT extract numbers that count things (eggs, reps, ml, hours slept, times). If the message is not a sleep-quality rating, return null.
+Return ONLY JSON: {"quality": 1-5} or {"quality": null}`;
+
+async function parseSleepQuality(text) {
+  try {
+    const response = await anthropic.messages.create({
+      model: HAIKU, max_tokens: 20, temperature: 0, system: SLEEP_QUALITY_SYSTEM,
+      messages: [{ role: 'user', content: text }],
+    });
+    const parsed = parseJSON(response.content[0].text);
+    const q = parsed?.quality;
+    return (typeof q === 'number' && q >= 1 && q <= 5) ? Math.round(q) : null;
+  } catch { return null; }
 }
 
 // ── Body parsing ──────────────────────────────────────────────────────────────
@@ -455,7 +566,7 @@ If a field is not mentioned, set it to null. muscle_mass_kg is lean/muscle mass 
 
 async function parseBody(text) {
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 256, system: BODY_SYSTEM,
+    model: HAIKU, max_tokens: 256, temperature: 0, system: BODY_SYSTEM,
     messages: [{ role: 'user', content: text }],
   });
   const parsed = parseJSON(response.content[0].text);
@@ -495,7 +606,7 @@ Rules:
 async function parsePlans(text, currentDateTime) {
   const content = currentDateTime ? `${currentDateTime}\n\n${text}` : text;
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 512, system: PLAN_SYSTEM,
+    model: HAIKU, max_tokens: 512, temperature: 0, system: PLAN_SYSTEM,
     messages: [{ role: 'user', content }],
   });
   const parsed = parseJSON(response.content[0].text);
@@ -505,7 +616,7 @@ async function parsePlans(text, currentDateTime) {
 // Returns true if user is saying they have no plans (vs naming a plan/task)
 async function isNoPlanResponse(text) {
   const resp = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 10,
+    model: HAIKU, max_tokens: 10, temperature: 0,
     system: 'User was asked "any plans for tomorrow?". Reply YES if they mean they have no plans (e.g. "no", "nah", "nothing", "free day", "all good"). Reply NO if they are describing a plan, task, or todo (regardless of how short or vague).',
     messages: [{ role: 'user', content: text }],
   });
@@ -514,7 +625,7 @@ async function isNoPlanResponse(text) {
 
 async function isPositiveResponse(text) {
   const resp = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 10,
+    model: HAIKU, max_tokens: 10, temperature: 0,
     system: 'User was asked if they want to apply suggested target changes. Reply YES if their message is any form of agreement, confirmation, or positive response. Reply NO if they are declining, asking questions, or saying something unrelated.',
     messages: [{ role: 'user', content: text }],
   });
@@ -526,8 +637,8 @@ async function isConfirmIntent(text) {
   const t = String(text).trim();
   if (/^(ok|okay|k|yes|yep|yup|y|sure|go|do it|log it|log|confirm|✅|👍|да|ок|окей|хорошо|ладно|давай|записывай|логируй|запиши|сохрани|подтверждаю)$/i.test(t)) return true;
   const resp = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 10,
-    system: 'User was asked to confirm or save something. Reply YES if their message is any form of agreement or confirmation in any language. Reply NO if they decline, want to edit or change something, ask a question, or say something unrelated.',
+    model: HAIKU, max_tokens: 10, temperature: 0,
+    system: 'User was asked to confirm saving something. Reply YES ONLY if the message is a clean, standalone agreement (e.g. "ok", "yes", "log it", "sounds good"). Reply NO if it contains a question (anything with "?", "why", "did you", "what", "how"), requests or states a change/correction, asserts a fact about the item, or is anything other than a pure confirmation — even if it also contains an agreeable-sounding word. When unsure, reply NO.',
     messages: [{ role: 'user', content: t }],
   });
   return resp.content[0].text.trim().toUpperCase().startsWith('Y');
@@ -538,7 +649,7 @@ async function isDeclineIntent(text) {
   const t = String(text).trim();
   if (/^(no|nope|n|cancel|stop|skip|abort|нет|отмена|отменить|не\s+надо|неважно|пропусти)$/i.test(t)) return true;
   const resp = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 10,
+    model: HAIKU, max_tokens: 10, temperature: 0,
     system: 'User was asked to do something. Reply YES if their message is any form of refusal, cancellation, or wanting to skip/stop in any language. Reply NO if they agree, ask a question, or say something unrelated.',
     messages: [{ role: 'user', content: t }],
   });
@@ -550,7 +661,7 @@ async function isDoneIntent(text) {
   const t = String(text).trim();
   if (/^(done|finished|finish|end|that'?s?\s*(it|all)|all done|all good|nothing|none|no|nah|nope|skip|готово|закончил|завершил|всё|все|хватит|ничего|нет)$/i.test(t)) return true;
   const resp = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 10,
+    model: HAIKU, max_tokens: 10, temperature: 0,
     system: 'User is in a multi-step flow and was asked if they are finished. Reply YES if their message means they are done/finished/completed or have nothing more to add, in any language. Reply NO if they are still going, logging more items, or saying something unrelated.',
     messages: [{ role: 'user', content: t }],
   });
@@ -565,7 +676,7 @@ entry_type: meal | workout | sleep | recovery | body`;
 
 async function parseTimeCorrection(text) {
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 128, system: TIME_CORRECTION_SYSTEM,
+    model: HAIKU, max_tokens: 128, temperature: 0, system: TIME_CORRECTION_SYSTEM,
     messages: [{ role: 'user', content: text }],
   });
   return parseJSON(response.content[0].text);
@@ -586,7 +697,7 @@ What should be corrected? Return ONLY JSON:
   "details": "any other details"
 }`;
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 256,
+    model: SONNET, max_tokens: 256, temperature: 0,
     system: 'You parse correction instructions for a health tracking bot. Return only JSON.',
     messages: [{ role: 'user', content: prompt }],
   });
@@ -598,13 +709,15 @@ What should be corrected? Return ONLY JSON:
 async function applyMealCorrection(existingData, correction) {
   const prompt = `Current meal data:\n${JSON.stringify(existingData, null, 2)}\n\nUser correction: "${correction}"\n\nApply the correction precisely:
 - If user says they DIDN'T have something, REMOVE those items from the items array entirely
+- If user corrects the food identity (says the food IS something completely different, e.g. "it's fish not chicken", "that's tofu not beef"), RE-ESTIMATE the macros from scratch for the new food at the same weight — do NOT scale the original macros, they belong to the wrong food
+- If user REFINES the composition or which part they actually ate (e.g. "mostly beef, I removed the sauce and vegetables", "it was 220g of almost pure beef", "I didn't eat the crusts, only the dough", "leaner cut", "no skin"), you MUST RECOMPUTE that item's calories/protein/carbs/fat to reflect the described composition at the stated/implied weight. The NUMBERS must change — do NOT keep the original macros and only edit the text/name. A correction that doesn't change any macro is wrong.
 - If user says to change a quantity/weight, update that item's calories/macros proportionally
 - If user says to add something, add it as a new item with estimated macros
-- NEVER change meal_name unless explicitly asked
+- Update meal_name only if it would otherwise misrepresent the food after a correction; never use a text/name tweak as a substitute for recomputing the macros
 - After ALL changes, recalculate totals.calories/protein/carbs/fat as the exact SUM of all remaining items
 - Return the complete updated JSON with the same structure`;
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 1024,
+    model: SONNET, max_tokens: 1024, temperature: 0,
     system: 'You are a meal data editor. Apply corrections to meal JSON precisely. When removing items, delete them from the items array. When changing amounts, scale the macros. Always recalculate totals as sum of items. Return only valid JSON with same structure.',
     messages: [{ role: 'user', content: prompt }],
   });
@@ -617,7 +730,7 @@ async function applyMealCorrection(existingData, correction) {
 
 async function parseTargetUpdate(text) {
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 128,
+    model: HAIKU, max_tokens: 128, temperature: 0,
     system: 'Parse a nutrition target update. Return ONLY JSON: {"calories": null, "protein": null, "carbs": null, "fat": null}. Set only the values explicitly mentioned, leave others null.',
     messages: [{ role: 'user', content: text }],
   });
@@ -638,7 +751,7 @@ If the user explicitly states all four values (calories, protein, carbs, fat), u
 If only some values are given, adjust the remaining ones to stay coherent (protein: 4 kcal/g, carbs: 4 kcal/g, fat: 9 kcal/g).
 Return ONLY JSON: {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}`;
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 128,
+    model: SONNET, max_tokens: 128, temperature: 0,
     system: 'You are a nutrition target calculator. Apply the requested change and recalculate all macros to stay coherent. Return only JSON.',
     messages: [{ role: 'user', content: prompt }],
   });
@@ -667,17 +780,20 @@ const STYLE_TONE = {
 - Critical rule: call out choices, not character. Never insult the user as a person.`,
 };
 
-function buildCoachSystem(targetsContext = '', coachingStyle = 2, language = 'en', userName = null, userProfileText = '') {
+function buildCoachSystem(targetsContext = '', coachingStyle = 2, language = 'en', userName = null, userProfileText = '', vacationMode = false) {
   const name = userName || 'the user';
   const styleLine = STYLE_TONE[coachingStyle] || STYLE_TONE[2];
   const langLine = language && language !== 'en' ? `\nRespond in ${language}. All messages must be in ${language}.` : '';
   const profileSection = userProfileText ? `\n${name}'s behavioral profile (observed patterns over time):\n${userProfileText}\n` : '';
-  return `You are ${name}'s personal health coach. Always completely honest.${langLine}
+  const vacationLine = vacationMode ? `\n${name} is on vacation. Keep tone light and supportive. Do not flag food choices, alcohol, or missed training days. Only raise concerns for genuine safety issues (illness, injury). Comment positively on any movement logged.` : '';
+  return `You are ${name}'s personal health coach. Always completely honest.${langLine}${vacationLine}
 
 Tone: ${styleLine}
 
 ${targetsContext ? `${name}'s current targets and profile:\n${targetsContext}\n` : ''}${profileSection}
 Rules:
+- YOU CANNOT LOG ANYTHING. You have no ability to log, record, save, add, or track entries — a separate system does that. NEVER say or imply that a meal, drink, workout, recovery, weight, or anything else was "logged", "recorded", "saved", "added", "tracked", or "got it, done" — and never produce a "✅ ... logged" style confirmation. You only discuss and advise.
+- LOG vs QUESTION: if ${name} is REPORTING something they ate/drank/did (a statement: "had a burger", "just did 200 balls", "drank a coffee", "ns lunch chicken") rather than ASKING about it, do NOT estimate its macros or pretend to log it. Reply briefly to ask if they want it logged — e.g. "want me to log that? 🍽" — so the real logger can record it. Genuine questions ("how much protein in a burger?", "would a burger fit my macros?", "what should I eat?") you answer normally and fully.
 - SPECIFIC. "Need 40g more protein — chicken breast or double scoop shake" not "eat more protein."
 - Daily messages: 3–5 sentences. Weekly reviews can be longer.
 - Track TRENDS. "Protein low 4 days straight" > "protein was low today."
@@ -686,6 +802,9 @@ Rules:
 - Practical, actionable answers.
 - Plans: "You said you'd do this. Now do it."
 - The context injected at the start of each message contains LIVE DATABASE STATE — always use those numbers for today's totals. Conversation history may contain outdated figures; the context is always authoritative.
+- DATES: the context already states the current date/day and labels every history row with its correct weekday. Trust those labels exactly. NEVER compute, count, or guess a day-of-week, date, or week boundary yourself, and never say the calendar "might be off" or contradict the provided date. The week starts Monday.
+- Never invent time pressure or deadlines ("X minutes left in the evening", "the day's almost over") — you do not know when the user sleeps.
+- Being UNDER a calorie target is normal and usually fine for a fat-loss goal. Don't frame remaining calories as a warning; just state them. Reserve ⚠️ for genuine overages or missed protein.
 - If asked about nutrition/workouts/progress and you have data in context, analyze it directly. If truly no data at all is available, ask the user to share what's missing.
 - When user asks what's for lunch/dinner: scan the Known Foods section for entries appropriate to that meal time and list them clearly.
 - For general nutrition questions (calories in X, macros of Y, can I eat Z): answer directly from your own knowledge. Never say "it's not in your known foods" or refuse to answer — Known Foods is only for logging accuracy, not a limit on what you can discuss.
@@ -703,7 +822,43 @@ EMOJI USE:
 - 😴🥩☕💊 = neutral descriptors (sleep, food types, drinks, reminders)
 - Never use 💪🔥⚡ on lines reporting failure or overage
 - Use sparingly. One emoji per 2-3 lines is plenty.
-- Telegram plain text. No markdown stars, no headers.`;
+- Telegram plain text. No markdown stars, no headers.
+WORKOUT PROGRAMMING:
+SESSION SIZE (hard caps — never exceed):
+- Upper-only: 5–7 exercises (1–2 push, 1–2 pull, 1 shoulder, 0–2 arms)
+- Lower-only: 4–5 exercises (1 squat pattern, 1 hinge, 1–2 accessories)
+- Full-body / combined / "upper+lower": 5–7 exercises TOTAL. Not upper list + lower list. Pick compounds that cover multiple groups, then add 1–2 accessories for what's missed. Stop at 6.
+
+COMBINED SESSION — priority order (stop when you hit 6):
+1. One lower compound (squat OR deadlift variant)
+2. One upper push compound (bench OR OHP)
+3. One upper pull compound (row OR pulldown)
+4. One second lower (hinge if you squatted, squat if you hinged) OR unilateral (split squat, lunge)
+5. One shoulder or arm accessory only if undertrained by the above
+6. Optional: one isolation for a lagging area
+For combined/full-body days only: compounds replace isolations — don't add two exercises for the same primary muscle group (two chest, two back, etc.). For dedicated muscle-group days (chest day, arm day, leg day), multiple exercises per group are expected and fine.
+
+EXERCISE SELECTION FROM TIMELINE:
+- Use whatever exercises are in the user's actual timeline — don't invent exercises they haven't done.
+- Triage: prioritise (a) flat and due for a bump, (b) currently progressing, (c) not done in 5–10 days. Ignore everything else.
+- Max 2 progression bumps per session — pick highest-impact (compounds over isolations).
+
+PROGRESSION (for exercises in the session):
+- Multi-joint compounds (any press, row, squat, hinge, pulldown, or carry variation) → +2.5kg when flat.
+- Single-joint isolations (any curl, raise, extension, fly, or crunch variation) → +1kg when flat.
+- At top of rep range while flat → bump weight, drop reps (e.g. 3×15@40kg → 3×12@42.5kg).
+- Progressing → continue at same increment.
+- Last done >7d ago → slot back in slightly lighter.
+
+VARIATION:
+- Swap at most 1 exercise per session for a variant not done recently. Never swap on combined days.
+
+OUTPUT:
+- Show delta only on bumped or returned exercises: "Exercise Name 3×12@42.5kg (up from 40kg — flat 3 sessions)". Don't annotate every line.
+- Stay in the user's rep range unless they ask otherwise.
+- No disclaimers, no periodization plans. Just: here's the session and why.
+MACRO CONCLUSIONS:
+- When stating a nutritional total in a conclusion (e.g. "brings you to Xg protein"), always show the addition inline immediately before it: "34 + 135 = 169g protein". Use that computed number in the conclusion — never substitute the target for the result.`;
 }
 
 // ── Onboarding: Opus-powered target generation ────────────────────────────────
@@ -754,12 +909,14 @@ async function parseOnboardingInput(step, text) {
     sleep:         'Bed time and wake time. Return: {"bed": "HH:MM"|null, "wake": "HH:MM"|null}',
     goal_weight:   'Target weight in kg, convert any units. Return: {"weight_kg": number|null}',
     gender:        'Gender from user input in any language. male/man/guy/парень/мужчина → "male", female/woman/girl/женщина/девушка → "female". Return: {"gender": "male"|"female"|null}',
+    review_day:    'Day of week for weekly check-in. Sunday=0, Monday=1, Tuesday=2, Wednesday=3, Thursday=4, Friday=5, Saturday=6. Accept any language or abbreviation (mon/lun/пн etc.). Return: {"dow": 0|1|2|3|4|5|6|null}',
   };
   const schema = schemas[step];
   if (!schema) return null;
   const resp = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 100,
+    temperature: 0,
     system: `Extract structured data from user input. User may write in any language. ${schema} Return ONLY valid JSON.`,
     messages: [{ role: 'user', content: text }],
   });
@@ -770,6 +927,7 @@ async function parseStats(text) {
   const resp = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 100,
+    temperature: 0,
     system: 'Extract weight in kg and height in cm from user input. Handle any language, units (lbs, stone, feet/inches, etc.) and convert to metric. Return only valid JSON: {"weight_kg": number|null, "height_cm": number|null}',
     messages: [{ role: 'user', content: text }],
   });
@@ -802,7 +960,7 @@ async function askCoach(question, context = '', targetsContext = '', knownFoodsC
   let userContent = context ? `${context}\n\nQuestion: ${question}` : question;
   if (knownFoodsContext) userContent = `Known foods for today:\n${knownFoodsContext}\n\n${userContent}`;
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 1024, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile),
+    model: SONNET, max_tokens: 1024, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile, userProfile.vacation_mode),
     messages: [{ role: 'user', content: userContent }],
   });
   return response.content[0].text;
@@ -825,7 +983,7 @@ async function askWithPhoto(photoBase64, caption, targetsContext = '', userProfi
 
 async function continueCoachReply(messages, targetsContext = '', userProfile = {}) {
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 1024, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile),
+    model: SONNET, max_tokens: 1024, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile, userProfile.vacation_mode),
     messages,
   });
   return response.content[0].text;
@@ -877,11 +1035,11 @@ function formatRecoveryRows(rows) {
 // ── Per-style examples ────────────────────────────────────────────────────────
 
 const DAY_SUMMARY_EXAMPLES = {
-  1: `"Today landed heavier than the target — 2567 cal vs 1800, with fat (137g) and carbs (183g) higher than aimed. Protein 21g short. Sleep was great at 8h 6m quality 4 — keep that going. Tomorrow's a fresh start.
+  1: `"Today landed heavier than the target — 2567 cal vs 1800, with fat (137g) and carbs (183g) higher than aimed. Protein 21g short. Tomorrow's a fresh start.
 prep for tomorrow: pick a lighter lunch."`,
-  2: `"Heavy fat and carbs day — 137g vs 60g, 183g vs 110g, calories 2567 vs 1800. Protein 21g short. Sleep was good. Win: 35min circuit 💪. Fix: cut cooking fats.
+  2: `"Heavy fat and carbs day — 137g vs 60g, 183g vs 110g, calories 2567 vs 1800. Protein 21g short. Win: 35min circuit 💪. Fix: cut cooking fats.
 prep for tomorrow: pick a low-fat lunch."`,
-  3: `"Today was a write-off. Fat at 137g — more than double the 60g target. Carbs 73g over. Calories 767 above your cap, the workout barely dented it. Protein 21g short on top. Sleep was the one bright spot. Fix: dumplings plus double-protein NS don't fit a 1800 cap.
+  3: `"Today was a write-off. Fat at 137g — more than double the 60g target. Carbs 73g over. Calories 767 above your cap, the workout barely dented it. Protein 21g short on top. Fix: dumplings plus double-protein NS don't fit a 1800 cap.
 prep for tomorrow: low-fat lunch, no exceptions."`,
 };
 
@@ -915,13 +1073,13 @@ ${dataSummary}
 
 OUTPUT REQUIREMENTS:
 - Each distinct point on its own line. No run-on paragraphs.
-- Emojis at the start of the line they belong to, never mid-sentence.
-- Mention every macro line marked "(flag)" — state the actual number and the target.
-- Skip macros not flagged.
-- If sleep is "not logged", skip the sleep mention entirely. Otherwise comment briefly on it.
-- If workouts section says "none", mention no training today. Otherwise name the type and duration or kcal burned.
+- Emojis at the start of the line, never mid-sentence. Emoji sentiment MUST match the line: ⚠️/🛑 only for genuine overages or missed protein; 💪/🔥 only for real wins; 😴🥩☕ are neutral descriptors. Never put a celebratory emoji on a problem line, or a warning on a fine line.
+- Mention every macro line marked "(flag)" — state the actual number and target. A macro with no flag is on track; you may briefly affirm it but NEVER warn about it. Being under calories is fine for a fat-loss goal — state it neutrally, don't warn.
+- Only mention sleep if quality ≤ 2 or hours < 6. Skip it if quality ≥ 3 and hours ≥ 6, or if not logged.
+- If workouts say "none", mention no training. Otherwise name each workout EXACTLY as written in the data (e.g. "Golf - Driving Range", "Leg Day") — never relabel a specific activity as a generic "gym"/"workout", and list each session on its own line.
 - Close with one line starting "prep for tomorrow:" plus one specific action.
-- 5–7 lines total.
+- Do not invent time pressure or deadlines.
+- 6–9 lines. Be genuinely useful — but only state facts present in the block.
 
 GOOD EXAMPLE (calibrated to the user's coaching style):
 ${exampleForStyle}`;
@@ -941,14 +1099,15 @@ ${dataSummary}
 
 OUTPUT REQUIREMENTS:
 - Each distinct point on its own line. No run-on paragraphs.
-- Emojis at the start of the line they belong to, never mid-sentence.
-- Lead with calories remaining vs target (exact numbers).
-- Mention every macro line marked "(flag)" with the actual number and target. For protein specifically — if flagged as UNDER — give one concrete suggestion to close the gap (e.g. "chicken breast or a shake").
+- Emojis at the start of the line, never mid-sentence. Emoji sentiment MUST match: ⚠️/🛑 only for genuine overages or missed protein; 💪/🔥 only for real wins; 😴🥩☕ neutral. No celebratory emoji on a problem line.
+- Lead with calories remaining vs target (exact numbers), stated NEUTRALLY. Being under target is normal for a fat-loss goal — do NOT warn about it or attach ⚠️; just report the number and, if useful, what would round out the day.
+- Mention every macro line marked "(flag)" with the actual number and target. For protein specifically — if flagged UNDER — give one concrete suggestion to close the gap ("chicken breast or a shake").
+- NEVER invent time pressure or deadlines. Do not say things like "X minutes left in the evening", "the day's almost over", or imply a cutoff — you do not know when the user sleeps.
 - If caffeine is marked "[flag]", mention it briefly.
 - If "User reminders" section is present, each reminder on its own line.
 - If "Upcoming plans" section is present, each plan on its own line. Do not add speculation.
 - Close with one line starting "prep for tomorrow:" + one specific action.
-- 4–6 lines total.
+- 5–7 lines.
 - Do not invent historical patterns ("4 days in a row…") — you only have today's data.
 
 GOOD EXAMPLE (calibrated to the user's coaching style):
@@ -1091,7 +1250,39 @@ async function generateWeeklyReview(weekData, targetsContext = '', userProfile =
   const summary = buildWeekSummary(weekData, targets);
   const response = await anthropic.messages.create({
     model: SONNET, max_tokens: 1024, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name),
-    messages: [{ role: 'user', content: `Write the weekly review using the pre-computed data block below.\n\n${summary}\n\nOUTPUT REQUIREMENTS:\n- Open with weight change and goal progress (use the Weight section).\n- Cover macro adherence using the flagged lines only: mention avg vs target and on-target % for any macro marked OVER or UNDER. Skip macros with no flag.\n- State training days count and name each session.\n- State sleep average in Xh Ym format and quality score. Never use decimal hours.\n- Call out best day and worst day using the pre-labeled values.\n- State one specific fix for the coming week.\n- If Target alignment says DIVERGED: suggest a concrete target adjustment (use the divergence numbers given) and end with "want me to update your targets?"\n- If Target alignment says ON TRACK or insufficient data: omit the target adjustment offer.\n- Length: 8-12 sentences. No markdown. Casual, direct tone.` }],
+    messages: [{ role: 'user', content: `Write the weekly review using the pre-computed data block below.\n\n${summary}\n\nOUTPUT REQUIREMENTS:\n- Open with weight change and goal progress (use the Weight section).\n- Cover macro adherence using the flagged lines only: mention avg vs target and on-target % for any macro marked OVER or UNDER. Skip macros with no flag.\n- State training days count and name each session.\n- State sleep average in Xh Ym format and quality score. Never use decimal hours.\n- Call out best day and worst day using the pre-labeled values.\n- ONLY suggest a change if a macro is flagged OVER/UNDER, training was inconsistent, or sleep was poor. If the week was clean — calories and protein on target, training consistent, and any macro variance is small (a few grams, explainable by water/bloating/rounding) — SAY SO plainly, affirm it was a strong week, and tell them to keep doing exactly what they did. Do NOT invent a fix or manufacture a problem on a good week; that just demotivates.\n- If Target alignment says DIVERGED: suggest a concrete target adjustment (use the divergence numbers given) and end with "want me to update your targets?"\n- If Target alignment says ON TRACK or insufficient data: omit the target adjustment offer.\n- Emoji sentiment must match the line: ⚠️/🛑 only for genuine misses/overages, 💪/🔥 only for real wins, neutral 😴🥩 otherwise. Never put a celebratory emoji on a problem line.
+- Use any dates/weekdays exactly as given in the data; never recompute or guess a day-of-week. Name each workout exactly as written; never genericize to "gym".
+- A few grams over a macro target is fine — only flag meaningful overages. Being under calories is normal for a deficit; don't warn about it.
+- Length: 8-12 sentences. No markdown. Casual, direct tone.` }],
+  });
+  return response.content[0].text;
+}
+
+// ── Vacation summary ──────────────────────────────────────────────────────────
+
+async function generateVacationSummary(vacData, targets, { durationDays, startWeight, currentWeight }) {
+  const days = Object.values(vacData.dailyTotals || {});
+  const loggedDays = days.length;
+  let block = `Vacation duration: ${durationDays} days\n`;
+  block += `Days with any log: ${loggedDays}\n`;
+  block += `Workouts done: ${vacData.trainDays ?? 0}\n`;
+  if (loggedDays > 0) {
+    const avgCal  = Math.round(days.reduce((s, d) => s + (d.calories || 0), 0) / loggedDays);
+    const avgProt = Math.round(days.reduce((s, d) => s + (d.protein  || 0), 0) / loggedDays);
+    block += `Avg calories (logged days): ${avgCal} / target ${targets?.calories ?? '?'}\n`;
+    block += `Avg protein (logged days): ${avgProt}g / target ${targets?.protein ?? '?'}g\n`;
+  }
+  if (startWeight && currentWeight) {
+    const delta = Math.round((currentWeight - startWeight) * 10) / 10;
+    block += `Weight: ${startWeight} → ${currentWeight} kg (${delta >= 0 ? '+' : ''}${delta} kg)\n`;
+  } else if (startWeight) {
+    block += `Weight at start: ${startWeight} kg (no end weight logged)\n`;
+  }
+  if (vacData.avgSleep) block += `Avg sleep: ${vacData.avgSleep}h (quality: ${vacData.avgSleepQuality}/5)\n`;
+
+  const response = await anthropic.messages.create({
+    model: SONNET, max_tokens: 400, system: buildCoachSystem('', 2, 'en', null),
+    messages: [{ role: 'user', content: `Write a brief vacation summary using this data:\n\n${block}\n\nOUTPUT REQUIREMENTS:\n- 4-6 sentences. Casual tone. No markdown.\n- Lead with duration.\n- Cover nutrition and workouts only if logged days > 0 — skip if nothing was logged.\n- Mention weight change if present.\n- End with short "back to it" encouragement.` }],
   });
   return response.content[0].text;
 }
@@ -1136,10 +1327,11 @@ DECISION RULES (positive, in priority order):
 
 OUTPUT:
 - One direct sentence (max two). Casual. No markdown.
-- Or exactly "OK" if nothing needs flagging.` }],
+- If nothing needs flagging: respond with the single word OK and absolutely nothing else — no explanation, no reasoning, no punctuation.` }],
   });
   const msg = response.content[0].text.trim();
-  return msg === 'OK' ? null : msg;
+  if (!msg || /^ok[.!]?$/i.test(msg) || /—\s*ok$/i.test(msg)) return null;
+  return msg;
 }
 
 
@@ -1148,7 +1340,7 @@ async function parseRenameIntent(text, recentLogs = []) {
     ? `\n\nRecent logged entries (id, type, name):\n${recentLogs.map(e => `- id:${e.id} [${e.type}] "${e.name}"`).join('\n')}`
     : '';
   const response = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 120,
+    model: HAIKU, max_tokens: 120, temperature: 0,
     messages: [{ role: 'user', content: `The user wants to rename a logged meal or workout entry. Given their message and the recent log entries, identify which entry they mean and what to rename it to.\n\nReturn JSON: {"entry_id": number or null, "new_name": string}. entry_id is the id of the matching log entry (null if you can't determine it from the list).${logsCtx}\n\nMessage: ${text}` }],
   });
   try {
@@ -1161,7 +1353,7 @@ async function parseRenameIntent(text, recentLogs = []) {
 
 async function isConversationContinuation(newMessage, previousSummary) {
   const resp = await anthropic.messages.create({
-    model: SONNET, max_tokens: 5,
+    model: SONNET, max_tokens: 5, temperature: 0,
     system: `A user just sent a new message. You have a summary of their most recent conversation with a health coach.
 Reply YES only if the previous conversation provides direct, specific context that meaningfully changes how you'd answer the new message — for example, a recommendation you made, a problem they described, or a decision that was reached.
 Reply NO if the connection is only superficial (both mention food, both mention health) or if the previous conversation is on a clearly different topic.
@@ -1214,11 +1406,11 @@ RESOLVED:
 module.exports = {
   classify, parseRenameIntent,
   analyzeMeal, applyMealCorrection, parseTargetUpdate, recalculateTargets,
-  parseWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseBody,
+  parseWorkout, nameWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseSleepQuality, parseBody,
   parseLiveExercise, generateWorkoutComparison, generateWeeklyStrengthSummary,
   parsePlans, isNoPlanResponse, isPositiveResponse, isConfirmIntent, isDeclineIntent, isDoneIntent, parseTimeCorrection, parseCorrection,
   askCoach, askWithPhoto, continueCoachReply,
-  generateDaySummary, generateEveningCheck, generateWeeklyReview, buildWeekSummary, formatRecoveryRows,
+  generateDaySummary, generateEveningCheck, generateWeeklyReview, generateVacationSummary, buildWeekSummary, formatRecoveryRows,
   DAY_SUMMARY_EXAMPLES, EVENING_CHECK_EXAMPLES, STRENGTH_SUMMARY_EXAMPLES, WORKOUT_COMPARISON_EXAMPLES,
   generateFullAnalysis, checkProactivePatterns, summarizeConversation, updateUserProfile,
 buildCoachSystem, matchEntryToDelete, matchPlanToModify,

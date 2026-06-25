@@ -21,11 +21,18 @@ function buildDataSummary(totals, targets, sleep, workouts, recovery, caffeine, 
   const tCarb = targets.carbs;
   const tFat  = targets.fat;
 
+  // Tolerance band: only flag a macro when it's meaningfully off target, not by a couple of grams.
+  const overBy  = (a, t, mAbs, mPct) => { const dd = a - t; return dd > Math.max(mAbs, t * mPct) ? dd : 0; };
+  const underBy = (a, t, mAbs, mPct) => { const dd = t - a; return dd > Math.max(mAbs, t * mPct) ? dd : 0; };
+  const calOver  = overBy(cal,  tCal,  50, 0.05);
+  const proUnder = underBy(pro, tPro,   8, 0.05);
+  const carbOver = overBy(carb, tCarb,  8, 0.10);
+  const fatOver  = overBy(fat,  tFat,   5, 0.10);
   const macroLines = [
-    `- calories: ${cal} / ${tCal} → ${cal > tCal ? `OVER by ${cal - tCal} (flag)` : 'under target'}`,
-    `- protein: ${pro} / ${tPro} → ${pro < tPro ? `UNDER by ${tPro - pro} (flag)` : 'at or over target'}`,
-    `- carbs: ${carb} / ${tCarb} → ${carb > tCarb ? `OVER by ${carb - tCarb} (flag)` : 'under target'}`,
-    `- fat: ${fat} / ${tFat} → ${fat > tFat ? `OVER by ${fat - tFat} (flag)` : 'under target'}`,
+    `- calories: ${cal} / ${tCal} → ${calOver ? `OVER by ${calOver} (flag)` : (cal < tCal ? 'under target (fine for a deficit)' : 'on target')}`,
+    `- protein: ${pro} / ${tPro} → ${proUnder ? `UNDER by ${proUnder} (flag)` : 'on/over target'}`,
+    `- carbs: ${carb} / ${tCarb} → ${carbOver ? `OVER by ${carbOver} (flag)` : 'within range'}`,
+    `- fat: ${fat} / ${tFat} → ${fatOver ? `OVER by ${fatOver} (flag)` : 'within range'}`,
   ];
   sections.push('Macros today:\n' + macroLines.join('\n'));
 
@@ -40,7 +47,7 @@ function buildDataSummary(totals, targets, sleep, workouts, recovery, caffeine, 
   if (workouts && workouts.length) {
     const wLines = workouts.map(w => {
       const parts = [w.duration_min ? `${w.duration_min}min` : null, w.calories_burned ? `${w.calories_burned} kcal burned` : null].filter(Boolean).join(', ');
-      return `- ${w.workout_name}${parts ? ', ' + parts : ''}`;
+      return `- ${w.name || w.workout_name || 'Workout'}${parts ? ', ' + parts : ''}`;
     });
     sections.push('Workouts today:\n' + wLines.join('\n'));
   } else {
@@ -57,11 +64,11 @@ function buildDataSummary(totals, targets, sleep, workouts, recovery, caffeine, 
     const { tdee, targetIntake, workoutKcal, eaten, netIntake, tdeeDeficit, targetDeficit, weight_kg, goal_weight } = tdeeCtx;
     const balLines = [
       `- TDEE (maintenance): ${tdee} kcal`,
-      `- Target intake: ${targetIntake} kcal (planned deficit ${targetDeficit} kcal)`,
-      `- Eaten today: ${eaten} kcal`,
+      `- Target intake: ${targetIntake} kcal (planned deficit from TDEE: ${targetDeficit} kcal)`,
+      `- Eaten today (gross): ${eaten} kcal`,
       `- Workout burned: ${workoutKcal} kcal`,
-      `- Net intake: ${netIntake} kcal`,
-      `- Actual deficit vs maintenance: ${tdeeDeficit} kcal`,
+      `- Net intake (eaten minus workout): ${netIntake} kcal`,
+      `- Deficit vs TDEE (TDEE minus gross eaten, not net): ${tdeeDeficit} kcal`,
     ];
     if (weight_kg) balLines.push(`- Current weight: ${weight_kg}kg → goal: ${goal_weight}kg`);
     sections.push('Energy balance:\n' + balLines.join('\n'));
@@ -117,7 +124,14 @@ async function handleMorningWake(bot, chatId, state, wakeOverrideMs = null) {
     prevTotals = db.getDailyMealTotalsFromSQLite(chatId, state.current_day_start);
   }
 
-  db.setState(chatId, { status: 'awake', current_day_start: wakeMs, bed_time: null });
+  // Write the sleep row immediately (quality blank) so a night is never lost if the
+  // quality reply is forgotten. The id is the persistent "awaiting quality" marker.
+  let openSleepId = null;
+  if (hasBed && sleepH != null) {
+    try { openSleepId = db.saveSleepLog(chatId, { bed_time: bedMs, wake_time: wakeMs, hours_slept: sleepH, quality: null, notes: '' }); }
+    catch (err) { console.error('Open sleep log error:', err.message); }
+  }
+  db.setState(chatId, { status: 'awake', current_day_start: wakeMs, bed_time: null, open_sleep_log_id: openSleepId });
   db.resetCaffeine(chatId);
 
   const sleepLine = sleepStr ? `${sleepStr} sleep. ` : '';
@@ -131,12 +145,16 @@ async function processQuality(bot, chatId, quality, wakeData) {
   const tz = wakeTz || requireTimezone(db.getState(chatId));
   const offsetMs = getOffsetMs(tz);
 
-  // Only log sleep if we actually know the bed time
-  if (hasBed && sleepH != null) {
-    try {
-      db.saveSleepLog(chatId, { bed_time: bedMs, wake_time: newDayStart, hours_slept: sleepH, quality, notes: '' });
-    } catch (err) {
-      console.error('Sleep log error:', err.message);
+  // Fill quality into the row written at wake. If none is pending (e.g. bed time was
+  // unknown at wake), fall back to inserting the full row now that we know the bed time.
+  if (quality != null) {
+    const updatedId = db.setSleepQuality(chatId, quality);
+    if (!updatedId && hasBed && sleepH != null) {
+      try {
+        db.saveSleepLog(chatId, { bed_time: bedMs, wake_time: newDayStart, hours_slept: sleepH, quality, notes: '' });
+      } catch (err) {
+        console.error('Sleep log error:', err.message);
+      }
     }
   }
 
@@ -342,7 +360,7 @@ async function sendEveningCheck(bot, chatId, dayStartMs) {
 
     db.setState(chatId, {
       last_coach_message_id: sent.message_id,
-      last_coach_context: JSON.stringify({ message: msg, context: JSON.stringify(checkData), timestamp: Date.now() }),
+      last_coach_context: JSON.stringify({ message: msg, context: dataSummary, timestamp: Date.now() }),
     });
     db.saveCoachMessage(chatId, 'assistant', msg, sent.message_id);
 

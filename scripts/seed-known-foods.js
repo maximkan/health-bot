@@ -22,6 +22,21 @@ db.exec(`CREATE TABLE IF NOT EXISTS known_foods (
 
 const DAY_MAP = { MONDAY:'Mon', TUESDAY:'Tue', WEDNESDAY:'Wed', THURSDAY:'Thu', FRIDAY:'Fri', SATURDAY:'Sat', SUNDAY:'Sun' };
 
+// Manual NS menu entries that aren't in the source spreadsheet. Add new items here.
+const NS_EXTRAS = [
+  { name: 'Banana Yogurt Crunch [NS Cafe]', serving: '1 serving', calories: 161, protein: 10.1, carbs: 15.5, fat: 6.9,  day_of_week: null, notes: 'NS Cafe | Dessert', source: 'Network School' },
+  { name: 'Nutty Pudding [NS Cafe]',        serving: '1 serving', calories: 157, protein: 3.7,  carbs: 11.6, fat: 13.1, day_of_week: null, notes: 'NS Cafe | Dessert', source: 'Network School' },
+];
+
+// Apply NS_EXTRAS to a given user's known_foods. Call after seeding the CSV-derived items.
+function applyNsExtras(chatId) {
+  const db2 = require('../src/db');
+  for (const f of NS_EXTRAS) db2.upsertKnownFood(chatId, f);
+  return NS_EXTRAS.length;
+}
+
+module.exports = { NS_EXTRAS, applyNsExtras };
+
 function parseLunch(lines, weekLabel) {
   const entries = [];
   let currentDay = '', currentProtein = '', currentItem = '', currentSize = 'R';
@@ -161,11 +176,10 @@ function parseCafe(lines) {
   return entries;
 }
 
-const upsert = db.prepare(`INSERT INTO known_foods (name,serving,calories,protein,carbs,fat,day_of_week,notes,source)
-  VALUES (?,?,?,?,?,?,?,?,?)
-  ON CONFLICT(name) DO UPDATE SET serving=excluded.serving,calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,day_of_week=excluded.day_of_week,notes=excluded.notes,source=excluded.source`);
-
 async function main() {
+  const upsert = db.prepare(`INSERT INTO known_foods (name,serving,calories,protein,carbs,fat,day_of_week,notes,source)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(name) DO UPDATE SET serving=excluded.serving,calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,day_of_week=excluded.day_of_week,notes=excluded.notes,source=excluded.source`);
   const csvPath = process.argv[2] || '/tmp/ns_foods.csv';
   if (!fs.existsSync(csvPath)) { console.error(`❌ ${csvPath} not found`); process.exit(1); }
 
@@ -204,4 +218,6 @@ async function main() {
   console.log(`Total in known_foods: ${db.prepare('SELECT COUNT(*) as c FROM known_foods').get().c}`);
 }
 
-main().catch(err => { console.error(err.message); process.exit(1); });
+if (require.main === module) {
+  main().catch(err => { console.error(err.message); process.exit(1); });
+}

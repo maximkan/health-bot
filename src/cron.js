@@ -4,15 +4,22 @@ const { getOffsetMs, getDateAt, getDateStrTz, requireTimezone } = require('./uti
 const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
 
 function buildProactiveDataBlock(recentData) {
-  const { today, targets, tdee, recentWeek, recentAlerts, todayAlert, caffeine_mg, last_caffeine_time, hasWorkout, last_sleep, noMealsYet, minutesAwake } = recentData;
+  const { today, targets, tdee, recentWeek, recentAlerts, todayAlert, caffeine_mg, last_caffeine_time, hasWorkout, last_sleep, noMealsYet, minutesAwake, localHour } = recentData;
   const lines = [];
 
-  if (today && targets) {
+  // Early in the day with nothing eaten yet: "no food" is normal, not a problem. Omit the ENTIRE
+  // food/macro section so the model has nothing to nag about (rendering "not logged yet" lines still
+  // made it nag ~2/3 of the time). Caffeine/sleep/workout/weekly-trend nudges still fire.
+  const hideMeals = (minutesAwake < 240) && (!today?.meals || today.meals.length === 0);
+  // A protein shortfall only matters once the day is winding down — there's all day to fill it.
+  const isEvening = (localHour == null) || localHour >= 18;
+
+  if (today && targets && !hideMeals) {
     const macroLine = (name, actual, target, dir) => {
       if (actual == null || target == null) return `- ${name}: not logged`;
       const diff = Math.round(actual - target);
       if (dir === 'over'  && diff > 0)  return `- ${name}: ${Math.round(actual)} / ${target} target  [OVER ${diff}] [FLAG]`;
-      if (dir === 'under' && diff < 0)  return `- ${name}: ${Math.round(actual)} / ${target} target  [UNDER ${-diff}] [FLAG]`;
+      if (dir === 'under' && diff < 0)  return `- ${name}: ${Math.round(actual)} / ${target} target  [UNDER ${-diff}]${isEvening ? ' [FLAG]' : ' (still hours left to hit it — NOT a problem yet, do not warn)'}`;
       return `- ${name}: ${Math.round(actual)} / ${target} target  [OK]`;
     };
     lines.push('Today\'s macros:');
@@ -26,8 +33,14 @@ function buildProactiveDataBlock(recentData) {
     lines.push('');
   }
 
+  // Early + nothing eaten: state this explicitly (an empty/omitted block confuses the model into
+  // inventing a "no food logged" flag). A hard code gate in runProactiveForUser is the real backstop.
+  if (hideMeals) {
+    lines.push('Food/macros: NOT evaluated yet — user is under 4h awake and eating nothing this early is completely normal. Do NOT mention food, meals, eating, breakfast, calories, or protein. Only consider caffeine, sleep, or workout below.');
+    lines.push('');
+  }
+
   // Hide meals section entirely when <4h awake AND nothing logged — Claude cannot see it
-  const hideMeals = (minutesAwake < 240) && (!today?.meals || today.meals.length === 0);
   if (!hideMeals) {
     if (today?.meals && today.meals.length > 0) {
       lines.push(`Today's meals (${today.meals.length}): ${today.meals.join(', ')}`);
@@ -97,6 +110,7 @@ function init(bot) {
     const s = db.getState(chatId);
     if (s.status === 'awake' && s.current_day_start) {
       scheduleUntimedRemindersForUser(chatId, s.current_day_start);
+      if (s.open_sleep_log_id) scheduleSleepQualityReminderForUser(chatId, s.current_day_start);
     }
   }
 
@@ -248,14 +262,7 @@ async function runProactiveForUser(chatId, timeLabel) {
     const targetsCtx = db.getTargetsText(chatId);
     const targets = db.getTargets(chatId);
 
-    const todayParts = todayStr.split('-').map(Number);
-    const todayUTC = new Date(Date.UTC(todayParts[0], todayParts[1] - 1, todayParts[2]));
-    const dow = todayUTC.getUTCDay();
-    const mondayUTC = new Date(todayUTC);
-    mondayUTC.setUTCDate(todayUTC.getUTCDate() - (dow === 0 ? 6 : dow - 1));
-    const mondayStr = mondayUTC.toISOString().split('T')[0];
-    const weekStartMs = getDateAt(mondayStr, 0, 0, getOffsetMs(tz));
-    const weekData = db.getWeekDataFromSQLite(chatId, weekStartMs);
+    const weekData = db.getWeekDataFromSQLite(chatId, Date.now() - 7 * 86400000);
     const recentWeek = weekData ? {
       dailyTotals:    weekData.dailyTotals,
       trainDays:      weekData.trainDays,
@@ -282,8 +289,10 @@ async function runProactiveForUser(chatId, timeLabel) {
         tdee = calculateTDEE(weight, height, age, weekData?.trainDays ?? 3, state.activity_level, state.gender);
       }
     } catch {}
+    const localHour = new Date(Date.now() + getOffsetMs(tz)).getUTCHours();
     const recentData = {
       minutesAwake,
+      localHour,
       today: { ...dayData.totals, meals: dayData.meals.map(m => m.name), recovery: dayData.recovery },
       targets,
       tdee,
@@ -301,6 +310,10 @@ async function runProactiveForUser(chatId, timeLabel) {
     const rawAlert = await claude.checkProactivePatterns(dataBlock, state);
     const alert = rawAlert ? require('./handlers/ask').stripMarkdown(rawAlert) : null;
     if (alert) {
+      // Hard gate (model-independent): never send a food/protein/calorie nudge when the user is
+      // early in their day with nothing logged — eating nothing this early is normal, not a problem.
+      const hideMealsNow = (minutesAwake < 240) && dayData.meals.length === 0;
+      if (hideMealsNow && ['meals', 'protein', 'calories'].includes(alertCategory(alert))) return;
       // Server-side same-category block — Claude's reasoning cannot override this
       if (todayAlert && isSameAlertCategory(todayAlert, alert)) return;
       const sent = await _bot.sendMessage(chatId, alert);
@@ -333,6 +346,23 @@ function scheduleUntimedRemindersForUser(chatId, wakeMs) {
     if (fireMs <= Date.now()) continue;
     scheduleOnce(chatId, fireMs, () => runUntimedReminderForUser(chatId));
   }
+}
+
+// ── Sleep-quality reminder (single nudge, 30 min after wake) ──────────────────
+
+async function runSleepQualityReminderForUser(chatId) {
+  const state = db.getState(chatId);
+  if (state.status !== 'awake') return;
+  if (!state.open_sleep_log_id) return; // already rated — nothing pending
+  try {
+    await _bot.sendMessage(chatId, "you didn't rate last night's sleep yet — reply 1-5 whenever.");
+  } catch (e) { console.error('Sleep quality reminder error:', e.message); }
+}
+
+function scheduleSleepQualityReminderForUser(chatId, wakeMs) {
+  const fireMs = wakeMs + 30 * 60 * 1000;
+  if (fireMs <= Date.now()) return; // past (e.g. restart hours later) — retroactive capture still works
+  scheduleOnce(chatId, fireMs, () => runSleepQualityReminderForUser(chatId));
 }
 
 // ── GCal mid-day sync ─────────────────────────────────────────────────────────
@@ -466,4 +496,4 @@ function rescheduleAll() {
   }
 }
 
-module.exports = { init, scheduleOnce, cancelOnce, cancelAllForChat, rescheduleAll, getBotRef, scheduleBedNudgesForDay, scheduleUserDailyCrons, scheduleUntimedRemindersForUser, buildProactiveDataBlock };
+module.exports = { init, scheduleOnce, cancelOnce, cancelAllForChat, rescheduleAll, getBotRef, scheduleBedNudgesForDay, scheduleUserDailyCrons, scheduleUntimedRemindersForUser, scheduleSleepQualityReminderForUser, buildProactiveDataBlock };

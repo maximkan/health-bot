@@ -39,6 +39,28 @@ function getDayOfWeekTz(tz) {
   return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(Date.now() + offsetMs).getUTCDay()];
 }
 
+// Weekday name (Mon/Tue/...) for a YYYY-MM-DD date string — computed, never guessed by an LLM.
+function weekdayForDateStr(dateStr) {
+  if (!dateStr) return '';
+  // noon UTC avoids any tz/DST edge flipping the day
+  return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(`${dateStr}T12:00:00Z`).getUTCDay()];
+}
+
+// UTC ms for 00:00 (local) of the current week's Monday, in the user's timezone.
+// This is the "this week starts at Monday" anchor. Because activity days are keyed by
+// day_start (wake time), filtering day_start >= this value includes Monday's wake onward
+// and excludes Sunday's activity day (whose day_start is the previous wake) — i.e. it
+// matches "Monday wake → Sunday bed".
+function getWeekStartMs(tz) {
+  if (!tz) throw new Error('getWeekStartMs called without tz');
+  const offsetMs = getOffsetMs(tz);
+  const local = new Date(Date.now() + offsetMs);
+  const dow = local.getUTCDay();                 // 0=Sun..6=Sat
+  const daysSinceMonday = (dow + 6) % 7;          // Mon=0, Sun=6
+  const mondayUTCmidnight = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - daysSinceMonday);
+  return mondayUTCmidnight - offsetMs;            // convert local-midnight back to real UTC ms
+}
+
 // Build ISO offset suffix from offsetMs (e.g. +05:30, -08:00)
 function buildTzSuffix(offsetMs) {
   const totalMin = Math.round(offsetMs / 60000);
@@ -133,7 +155,7 @@ function getActivityTomorrowStr(dayStartMs, tz) {
 
 // Extract a time reference like "9am", "9:30am", "09:30" from text, return UTC ms for today at that time
 // Returns null if no time found
-function extractTimeMs(text, tz) {
+function extractTimeMs(text, tz, opts = {}) {
   if (!tz) throw new Error('extractTimeMs called without tz');
   if (!text) return null;
   const offsetMs = getOffsetMs(tz);
@@ -161,6 +183,15 @@ function extractTimeMs(text, tz) {
     if (ampm === 'am' && h === 12) h = 0;
     if (h < 0 || h > 23) return null;
     return toMs(h, min);
+  }
+  // Bare hour ("woke up 9") — only when caller opts in (wake/bed context), since a lone number
+  // is ambiguous elsewhere. Taken as a 24h hour: "9" → 09:00. Caller guards future times.
+  if (opts.allowBareHour) {
+    const mb = text.match(/\b(\d{1,2})\b/);
+    if (mb) {
+      const h = parseInt(mb[1]);
+      if (h >= 0 && h <= 23) return toMs(h, 0);
+    }
   }
   return null;
 }
@@ -201,5 +232,5 @@ module.exports = {
   tsToISO, tsToTimeStr, buildTimeISO, buildDateTimeISO,
   getDateAt, getActivityTomorrowStr, extractTimeMs, detectRetroDate,
   getOffsetMs, getDateStrTz, getHourTz, nowContextTz, getTomorrowStrTz, nowISOTz,
-  getDayOfWeekTz, requireTimezone,
+  getDayOfWeekTz, weekdayForDateStr, getWeekStartMs, requireTimezone,
 };

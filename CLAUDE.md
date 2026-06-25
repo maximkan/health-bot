@@ -57,6 +57,17 @@ When deploying `claude.js`: always `scp` to BOTH `src/claude.js` AND `src/handle
 
 ---
 
+## Changelog & Version Control — MANDATORY on every code change
+
+Every code change in this repo MUST be accompanied, in the same turn, by BOTH:
+
+1. **Update `CHANGELOG.md`** — prepend an entry under today's date (newest first) describing *what* changed and *why*, in plain user-facing terms, with the files touched. Create the date heading if it doesn't exist yet.
+2. **Commit and push to GitHub** (`origin/main`): `git -C /Users/ydb/health-bot add -A && git commit -m "..." && git push origin main`. The deployed server code must ALWAYS correspond to a pushed commit — the audit found the live code matched no commit anywhere; never let that recur.
+
+Do these together with the code change, never deferred. Keep commits scoped (one logical change per commit where practical). Secrets (`.env`, `credentials.json`, `*.db`, `data/`) are gitignored — never commit them.
+
+---
+
 ## Per-user feature flags (in `user_state`)
 
 | Flag | Meaning |

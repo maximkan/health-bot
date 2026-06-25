@@ -55,12 +55,27 @@ function buildWorkoutComparisonBlock(current, exerciseHistory) {
     const prevTotalReps = totalReps(hist.exercise);
     const prevFmt = fmtSet(hist.exercise);
 
+    // Volume load: sets × reps × weight (use 1 for bodyweight so reps still count)
+    const currVol = allSets.reduce((s, e) => s + totalReps(e) * (topWeight(e) || 1), 0);
+    const prevVol = prevTotalReps * (prevTopW || 1);
+    const volDelta = prevVol > 0 ? (currVol - prevVol) / prevVol : 0;
+
     let tag;
-    if (currTopW > prevTopW)               { tag = `[UP +${(currTopW - prevTopW).toFixed(1)}kg top set]`; upCount++; }
-    else if (currTopW < prevTopW)          { tag = `[DOWN -${(prevTopW - currTopW).toFixed(1)}kg top set]`; downCount++; }
-    else if (currTotalReps > prevTotalReps) { tag = `[UP +${currTotalReps - prevTotalReps} reps]`; upCount++; }
-    else if (currTotalReps < prevTotalReps) { tag = `[DOWN -${prevTotalReps - currTotalReps} reps]`; downCount++; }
-    else                                   { tag = `[FLAT]`; flatCount++; }
+    if (currTopW > prevTopW) {
+      tag = `[UP +${(currTopW - prevTopW).toFixed(1)}kg top set]`; upCount++;
+    } else if (volDelta >= 0.02) {
+      // Volume up even if weight same or lower — progress
+      tag = currTopW < prevTopW
+        ? `[UP +${Math.round(volDelta * 100)}% volume, lighter weight]`
+        : `[UP +${currTotalReps - prevTotalReps} reps]`;
+      upCount++;
+    } else if (currTopW < prevTopW && volDelta < -0.05) {
+      tag = `[DOWN -${(prevTopW - currTopW).toFixed(1)}kg, -${Math.round(-volDelta * 100)}% volume]`; downCount++;
+    } else if (currTopW === prevTopW && currTotalReps < prevTotalReps) {
+      tag = `[DOWN -${prevTotalReps - currTotalReps} reps]`; downCount++;
+    } else {
+      tag = `[FLAT]`; flatCount++;
+    }
 
     lines.push(`- ${name}: ${prevFmt} (${hist.date}, ${hist.workoutName})  →  ${currFmt}  ${tag}`);
   }
@@ -69,13 +84,24 @@ function buildWorkoutComparisonBlock(current, exerciseHistory) {
   return [`Per-exercise comparison (each vs most recent previous occurrence):`, ...lines, '', verdict].join('\n');
 }
 
-function buildStrengthSummaryBlock(workouts) {
+// thisWeekIds + reviewedWeekStartMs make "this week" identical to the main weekly review
+// (same workout set), so the two messages can never disagree on the count. Falls back to a
+// rolling window if those aren't provided.
+function buildStrengthSummaryBlock(workouts, thisWeekIds = null, reviewedWeekStartMs = null) {
   if (!workouts?.length) return 'No workouts logged in the period.';
 
   const now = Date.now();
   const DAY = 24 * 3600 * 1000;
-  const bucketOf = ms => {
-    const daysAgo = Math.floor((now - ms) / DAY);
+  const aligned = thisWeekIds instanceof Set && reviewedWeekStartMs != null;
+  const bucketOf = w => {
+    if (aligned) {
+      if (thisWeekIds.has(w.id)) return 'thisWeek';
+      const ds = w.day_start ?? w.logged_at;
+      if (ds >= reviewedWeekStartMs - 7 * DAY)  return 'lastWeek';
+      if (ds >= reviewedWeekStartMs - 14 * DAY) return '2weeksAgo';
+      return 'older';
+    }
+    const daysAgo = Math.floor((now - w.logged_at) / DAY);
     if (daysAgo < 7)  return 'thisWeek';
     if (daysAgo < 14) return 'lastWeek';
     if (daysAgo < 21) return '2weeksAgo';
@@ -87,7 +113,7 @@ function buildStrengthSummaryBlock(workouts) {
   const exTracker = new Map();
 
   for (const w of workouts) {
-    const b = bucketOf(w.logged_at);
+    const b = bucketOf(w);
     sessions[b]++;
     durSum[b] += (w.duration_min ?? 0);
 

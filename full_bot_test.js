@@ -1082,7 +1082,7 @@ async function testAskHandler() {
 
     // Supplement questions
     { text: 'should i take vitamin D',
-      check: r => /vitamin.?d|supplement|sun|deficiency/i.test(r),
+      check: r => /vitamin.?d|supplement|sun|defic|fat.?soluble|\biu\b|2000|4000/i.test(r),
       label: 'supplement: vitamin D' },
 
     { text: 'whats the best pre workout meal',

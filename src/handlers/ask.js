@@ -1,7 +1,7 @@
 const claude = require('../claude');
 const gcal   = require('../gcal');
 const db     = require('../db');
-const { nowContextTz, getDateStrTz, getTomorrowStrTz, getHourTz, getOffsetMs, requireTimezone } = require('../utils/time');
+const { nowContextTz, getDateStrTz, getTomorrowStrTz, getHourTz, getOffsetMs, weekdayForDateStr, getWeekStartMs, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 const { calculateTDEE, ageFromBirthday } = require('../utils/tdee');
 
@@ -11,12 +11,14 @@ function buildFullAnalysisBlock({ bodyMeasurements = [], historical = {}, target
   const lines = [];
 
   if (bodyMeasurements.length) {
-    const sorted = [...bodyMeasurements].sort((a, b) => new Date(a.logged_at) - new Date(b.logged_at));
+    // getAllBodyMeasurements returns `.date` (YYYY-MM-DD), not `.logged_at` — using the latter
+    // gave new Date(undefined) → "Invalid time value" crash on the whole full-analysis path.
+    const sorted = [...bodyMeasurements].sort((a, b) => new Date(a.date) - new Date(b.date));
     const first = sorted[0];
     const last  = sorted[sorted.length - 1];
-    const weeks = Math.max(1, (new Date(last.logged_at) - new Date(first.logged_at)) / WEEK);
-    const periodStart = new Date(first.logged_at).toISOString().split('T')[0];
-    const periodEnd   = new Date(last.logged_at).toISOString().split('T')[0];
+    const weeks = Math.max(1, (new Date(last.date) - new Date(first.date)) / WEEK);
+    const periodStart = first.date;
+    const periodEnd   = last.date;
 
     lines.push(`Period: ${periodStart} to ${periodEnd} (${weeks.toFixed(1)} weeks)`);
     lines.push('');
@@ -166,6 +168,64 @@ function formatRecoveryRows(rows) {
   return parts;
 }
 
+function buildWorkoutContext(workouts) {
+  if (!workouts.length) return '';
+  const now = Date.now();
+
+  // Session log (newest first, cap at 10)
+  const sessionLines = workouts.slice(0, 10).map(w => {
+    const date = w.retro_date || new Date(w.logged_at).toISOString().slice(0, 10);
+    const exs = (w.exercises || []).map(e => {
+      if (e.sets_detail?.length) return `${e.name} ${e.sets_detail.map(d => `${d.sets ?? 1}×${d.reps}${d.weight_kg ? '@' + d.weight_kg + 'kg' : ''}`).join('+')}`;
+      return `${e.name}${e.sets ? ` ${e.sets}×${e.reps}` : ''}${e.weight_kg ? '@' + e.weight_kg + 'kg' : ''}`;
+    }).join(', ');
+    const meta = [w.duration_min ? `${w.duration_min}min` : null, w.calories_burned ? `${w.calories_burned}kcal` : null].filter(Boolean).join(', ');
+    return `  ${date}: ${w.workout_name}${meta ? ` (${meta})` : ''}${exs ? ' — ' + exs : ''}`;
+  });
+
+  // Per-exercise timelines grouped by name
+  const byExercise = {};
+  for (const w of workouts) {
+    const date = w.retro_date || new Date(w.logged_at).toISOString().slice(0, 10);
+    for (const e of (w.exercises || [])) {
+      if (!e.name) continue;
+      const key = e.name.trim();
+      const topWeight = e.sets_detail?.length
+        ? Math.max(...e.sets_detail.map(d => d.weight_kg || 0))
+        : (e.weight_kg || 0);
+      const sets = e.sets || e.sets_detail?.length || 1;
+      const reps = e.reps || e.sets_detail?.[0]?.reps || 0;
+      if (!byExercise[key]) byExercise[key] = [];
+      byExercise[key].push({ date, ts: w.logged_at, label: `${sets}×${reps}${topWeight ? '@' + topWeight + 'kg' : ''}`, weight: topWeight });
+    }
+  }
+
+  const exerciseLines = Object.entries(byExercise).map(([name, entries]) => {
+    entries.sort((a, b) => a.ts - b.ts);
+    const recent = entries.slice(-5);
+    const timeline = recent.map(e => `${e.date} ${e.label}`).join(' | ');
+    const last = entries[entries.length - 1];
+    const daysSince = Math.floor((now - last.ts) / 86400000);
+    let tag = '';
+    if (recent.length >= 2 && last.weight > 0) {
+      const weights = recent.map(e => e.weight);
+      const flatCount = entries.filter(e => e.weight === last.weight).length;
+      const isFlat = weights.slice(-2).every(w => w === last.weight);
+      const isUp   = last.weight > weights[0];
+      const isDown = last.weight < weights[0];
+      if (isFlat && flatCount >= 2) tag = ` → FLAT ${flatCount} sessions`;
+      else if (isUp)   tag = ` → PROGRESSING`;
+      else if (isDown) tag = ` → REGRESSED`;
+    }
+    if (daysSince > 10) tag += ` (last: ${daysSince}d ago)`;
+    return `  ${name}: ${timeline}${tag}`;
+  }).sort().join('\n');
+
+  const parts = [`Workout sessions (newest first):\n${sessionLines.join('\n')}`];
+  if (exerciseLines) parts.push(`Exercise timelines (oldest→newest):\n${exerciseLines}`);
+  return parts.join('\n\n');
+}
+
 async function buildDayContext(chatId) {
   const state    = db.getState(chatId);
   const tz = requireTimezone(state);
@@ -273,27 +333,56 @@ async function handleAsk(bot, msg, context = '', intents = []) {
     // Always include historical data — window based on what the question implies
     let histCtx = '';
     try {
+      // "this week" = real calendar week starting Monday-wake (user's tz); otherwise a rolling N-day window
+      const isThisWeek = /\bthis\s+week\b/i.test(text);
       const daysBack = parseDaysFromQuery(text);
-      const sinceMs = Date.now() - daysBack * 24 * 3600 * 1000;
+      const sinceMs = isThisWeek ? getWeekStartMs(tz) : (Date.now() - daysBack * 24 * 3600 * 1000);
       const histData = db.getWeekDataFromSQLite(chatId, sinceMs);
       if (histData && Object.keys(histData.dailyTotals || {}).length > 0) {
         const days = Object.entries(histData.dailyTotals).sort(([a],[b]) => a.localeCompare(b));
-        const lines = days.map(([date, d]) => `  ${date}: ${d.calories} kcal / ${Math.round(d.protein)}g P / ${Math.round(d.carbs)}g C / ${Math.round(d.fat)}g F`);
-        histCtx = `\nNutrition history (last ${daysBack} days):\n${lines.join('\n')}`;
+        // Weekday is computed here (never left for the model to infer) so dates are always labeled correctly
+        const lines = days.map(([date, d]) => `  ${weekdayForDateStr(date)} ${date}: ${d.calories} kcal / ${Math.round(d.protein)}g P / ${Math.round(d.carbs)}g C / ${Math.round(d.fat)}g F`);
+        const histLabel = isThisWeek ? 'Nutrition this week (week starts Monday)' : `Nutrition history (last ${daysBack} days)`;
+        histCtx = `\n${histLabel}:\n${lines.join('\n')}`;
+
+        // Precompute aggregates in code so the coach never does (and botches) the arithmetic.
+        // Average over days with food logged only — empty days shouldn't drag the mean down.
+        const logged = days.filter(([, d]) => (d.calories || 0) > 0);
+        const nd = logged.length;
+        if (nd > 0) {
+          let tgt = null; try { tgt = db.getTargets(chatId); } catch {}
+          const sum = k => logged.reduce((s, [, d]) => s + (d[k] || 0), 0);
+          const avgCal = Math.round(sum('calories') / nd);
+          const totalCal = Math.round(sum('calories'));
+          const agg = [
+            `\nPeriod aggregates (PRECOMPUTED — use these EXACT numbers, never recalculate or re-sum):`,
+            `- Days with food logged: ${nd}`,
+            `- Average/day: ${avgCal} kcal, ${Math.round(sum('protein') / nd)}g protein, ${Math.round(sum('carbs') / nd)}g carbs, ${Math.round(sum('fat') / nd)}g fat`,
+            `- Total logged: ${totalCal} kcal`,
+          ];
+          if (tgt?.calories) {
+            const budget = tgt.calories * nd;
+            const diff = budget - totalCal;
+            const overDays = logged.filter(([, d]) => d.calories > tgt.calories).length;
+            agg.push(`- Avg vs target: ${avgCal} vs ${tgt.calories}/day → ${avgCal <= tgt.calories ? (tgt.calories - avgCal) + ' kcal UNDER target' : (avgCal - tgt.calories) + ' kcal OVER target'}`);
+            agg.push(`- Running total vs ${nd}-day budget (${budget} kcal): ${diff >= 0 ? diff + ' kcal UNDER budget — room to spare' : (-diff) + ' kcal OVER budget'}`);
+            agg.push(`- Days over calorie target: ${overDays} of ${nd}`);
+          }
+          if (tgt?.protein) {
+            agg.push(`- Days protein target hit (>=${tgt.protein}g): ${logged.filter(([, d]) => d.protein >= tgt.protein).length} of ${nd}`);
+          }
+          const bl = histData.bodyLogs || [];
+          if (bl.length >= 2 && bl[0].weight_kg != null && bl[bl.length - 1].weight_kg != null) {
+            const dw = +(bl[bl.length - 1].weight_kg - bl[0].weight_kg).toFixed(1);
+            agg.push(`- Weight trend in period: ${bl[0].weight_kg}kg → ${bl[bl.length - 1].weight_kg}kg (${dw > 0 ? '+' : ''}${dw}kg)`);
+          }
+          histCtx += '\n' + agg.join('\n');
+        }
         if (histData.trainDays) histCtx += `\nWorkout days in period: ${histData.trainDays}`;
-        // Full workout log for the period (no artificial limit — user can ask about any workout)
+        // Workout history with per-exercise timelines and progression tags
         const recentWorkouts = db.getRecentWorkouts(chatId, daysBack);
         if (recentWorkouts.length) {
-          const wLines = recentWorkouts.map(w => {
-            const exs = (w.exercises || []).map(e => {
-              if (e.sets_detail?.length) return `${e.name} ${e.sets_detail.map(d => `${d.sets}×${d.reps}${d.weight_kg ? '@' + d.weight_kg + 'kg' : ''}`).join('+')}`;
-              return `${e.name}${e.sets ? ` ${e.sets}×${e.reps}` : ''}${e.weight_kg ? '@' + e.weight_kg + 'kg' : ''}`;
-            }).join(', ');
-            const meta = [w.duration_min ? `${w.duration_min}min` : null, w.calories_burned ? `${w.calories_burned}kcal` : null].filter(Boolean).join(', ');
-            const dateStr = w.retro_date || new Date(w.logged_at).toISOString().split('T')[0];
-            return `  ${dateStr}: ${w.workout_name}${meta ? ` (${meta})` : ''}${exs ? ' — ' + exs : ''}`;
-          });
-          histCtx += `\nWorkout history (last ${daysBack} days):\n${wLines.join('\n')}`;
+          histCtx += '\n' + buildWorkoutContext(recentWorkouts);
         }
         if (histData.avgSleep)  histCtx += `\nAvg sleep in period: ${fmtSleep(histData.avgSleep)}${histData.avgSleepQuality ? ` (avg quality ${histData.avgSleepQuality}/5)` : ''}`;
         if (histData.recoverySessions?.length) {

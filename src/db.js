@@ -85,6 +85,20 @@ addCol('user_state', 'user_profile', 'TEXT');
 addCol('user_state', 'body_metrics', 'TEXT DEFAULT "weight"');
 addCol('user_state', 'user_reminders', 'TEXT DEFAULT "[]"');
 addCol('user_state', 'institution_keywords', 'TEXT DEFAULT NULL');
+addCol('user_state', 'vacation_mode', 'INTEGER DEFAULT 0');
+addCol('user_state', 'vacation_start_ms', 'INTEGER');
+addCol('user_state', 'vacation_start_weight', 'REAL');
+addCol('user_state', 'weekly_review_dow', 'INTEGER DEFAULT 1');
+addCol('user_state', 'last_weekly_review_completed_at', 'INTEGER');
+addCol('user_state', 'open_sleep_log_id', 'INTEGER');
+
+// Pending conversation state — persisted so in-flight flows (meal_confirm, morning_quality,
+// live_workout, etc.) survive process restarts instead of being lost from an in-memory Map.
+db.exec(`CREATE TABLE IF NOT EXISTS pending_states (
+  chat_id INTEGER PRIMARY KEY,
+  payload TEXT,
+  updated_at INTEGER
+)`);
 addCol('sleep_log', 'type', 'TEXT DEFAULT "Night"');
 addCol('recovery_log', 'protocol', 'TEXT DEFAULT "single"');
 addCol('recovery_log', 'protocol_id', 'TEXT');
@@ -302,6 +316,22 @@ function setState(chatId, updates) {
   db.prepare(sql).run(...keys.map(k => updates[k] ?? null), chatId);
 }
 
+// ── Pending conversation state (DB-backed, restart-safe) ──────────────────────
+const _pendingSet = db.prepare('INSERT INTO pending_states (chat_id,payload,updated_at) VALUES (?,?,?) ON CONFLICT(chat_id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at');
+const _pendingGet = db.prepare('SELECT payload FROM pending_states WHERE chat_id=?');
+const _pendingDel = db.prepare('DELETE FROM pending_states WHERE chat_id=?');
+function setPendingStateDb(chatId, obj) {
+  try { _pendingSet.run(chatId, JSON.stringify(obj ?? {}), Date.now()); }
+  catch (e) { console.error('setPendingStateDb error:', e.message); }
+}
+function getPendingStateDb(chatId) {
+  const r = _pendingGet.get(chatId);
+  if (!r) return undefined;
+  try { return JSON.parse(r.payload); } catch { return undefined; }
+}
+function hasPendingStateDb(chatId) { return !!_pendingGet.get(chatId); }
+function deletePendingStateDb(chatId) { _pendingDel.run(chatId); }
+
 function addCaffeine(chatId, mg) {
   const state = getState(chatId);
   setState(chatId, { caffeine_today_mg: (state.caffeine_today_mg ?? 0) + mg, last_caffeine_time: new Date().toISOString() });
@@ -497,9 +527,11 @@ function getWeekDataFromSQLite(chatId, sinceMs) {
   const tz = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone;
   if (!tz) throw new Error(`timezone missing for chat ${chatId} — complete onboarding to fix.`);
   const OFFSET = getOffsetMs(tz);
-  const meals      = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
-  const workouts   = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
-  const sleeps     = db.prepare('SELECT hours_slept, quality, type, wake_time, logged_at FROM sleep_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
+  // Filter by the ACTIVITY day (day_start), not wall-clock logged_at, so a week boundary
+  // (Monday-wake) includes/excludes whole activity days cleanly instead of slicing mid-day.
+  const meals      = db.prepare('SELECT * FROM meal_log WHERE chat_id=? AND COALESCE(day_start, logged_at) >= ? ORDER BY logged_at ASC').all(chatId, sinceMs);
+  const workouts   = db.prepare('SELECT * FROM workout_log WHERE chat_id=? AND COALESCE(day_start, logged_at) >= ? ORDER BY logged_at ASC').all(chatId, sinceMs);
+  const sleeps     = db.prepare('SELECT hours_slept, quality, type, bed_time, wake_time, logged_at FROM sleep_log WHERE chat_id=? AND logged_at>=?').all(chatId, sinceMs);
   const recoveries = db.prepare('SELECT type, rounds, duration_per_round_min, total_duration_min, temperature_c, protocol, protocol_id, sequence_order, round_number, logged_at FROM recovery_log WHERE chat_id=? AND logged_at>?').all(chatId, sinceMs);
 
   const dailyTotals = {};
@@ -521,11 +553,20 @@ function getWeekDataFromSQLite(chatId, sinceMs) {
     if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0 };
     dailyTotals[key].trained = true;
   }
+  // Attribute each night by BED day (the activity day active at bed time) so weekly stats agree
+  // with the Monday review and with the "week ends at Sunday's bedtime" model.
+  const sleepDayStarts = [...new Set([...meals, ...workouts].map(r => r.day_start).filter(v => v != null))].sort((a, b) => a - b);
+  const weekNightSleeps = [];
   for (const s of sleeps) {
     if ((s.type ?? 'Night') !== 'Night') continue;
-    const wakeMs = s.wake_time || s.logged_at;
-    if (!wakeMs) continue;
-    const key = new Date(wakeMs + OFFSET).toISOString().split('T')[0];
+    const bedMs = s.bed_time || s.wake_time || s.logged_at;
+    if (!bedMs) continue;
+    let anchor = null;
+    for (const ds of sleepDayStarts) { if (ds <= bedMs) anchor = ds; else break; }
+    if (anchor == null) anchor = bedMs;   // robust: a night with no logged activity that day is never dropped
+    if (anchor < sinceMs) continue;        // bed day belongs to an earlier week
+    weekNightSleeps.push(s);
+    const key = new Date(anchor + OFFSET).toISOString().split('T')[0];
     if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0 };
     dailyTotals[key].sleep_h = s.hours_slept;
     dailyTotals[key].sleep_q = s.quality;
@@ -537,9 +578,8 @@ function getWeekDataFromSQLite(chatId, sinceMs) {
   }
 
   const trainDaySet = new Set(workouts.map(w => new Date((w.day_start || w.logged_at) + OFFSET).toISOString().split('T')[0]));
-  const nightSleeps = sleeps.filter(s => (s.type ?? 'Night') === 'Night');
-  const avgSleep = nightSleeps.length ? Math.round(nightSleeps.reduce((s, r) => s + (r.hours_slept || 0), 0) / nightSleeps.length * 10) / 10 : null;
-  const avgSleepQuality = nightSleeps.length ? Math.round(nightSleeps.reduce((s, r) => s + (r.quality || 3), 0) / nightSleeps.length * 10) / 10 : null;
+  const avgSleep = weekNightSleeps.length ? Math.round(weekNightSleeps.reduce((s, r) => s + (r.hours_slept || 0), 0) / weekNightSleeps.length * 10) / 10 : null;
+  const avgSleepQuality = weekNightSleeps.length ? Math.round(weekNightSleeps.reduce((s, r) => s + (r.quality || 3), 0) / weekNightSleeps.length * 10) / 10 : null;
   const recoverySessions = recoveries.map(r => ({ date: new Date(r.logged_at + OFFSET).toISOString().split('T')[0], type: r.type, rounds: r.rounds, duration_per_round_min: r.duration_per_round_min, total_duration_min: r.total_duration_min, temperature_c: r.temperature_c, protocol: r.protocol, protocol_id: r.protocol_id, sequence_order: r.sequence_order, round_number: r.round_number }));
 
   const bodyLogs = db.prepare('SELECT weight_kg, body_fat_pct, muscle_mass_kg, logged_at FROM body_log WHERE chat_id=? AND logged_at>? ORDER BY logged_at ASC').all(chatId, sinceMs);
@@ -550,38 +590,43 @@ function getWeekDataFromSQLite(chatId, sinceMs) {
 
 function getWeeklyReviewData(chatId, currentDayStart) {
   const { getOffsetMs } = require('./utils/time');
-  const tz = db.prepare('SELECT timezone FROM user_state WHERE chat_id=?').get(chatId)?.timezone;
+  const userRow = db.prepare('SELECT timezone, last_weekly_review_completed_at FROM user_state WHERE chat_id=?').get(chatId);
+  const tz = userRow?.timezone;
   if (!tz) throw new Error(`timezone missing for chat ${chatId}`);
   const OFFSET = getOffsetMs(tz);
 
-  // Find distinct day_starts from meals+workouts before currentDayStart, newest first
-  const allRows = db.prepare(`
-    SELECT DISTINCT day_start FROM meal_log WHERE chat_id=? AND day_start IS NOT NULL AND day_start < ?
-    UNION
-    SELECT DISTINCT day_start FROM workout_log WHERE chat_id=? AND day_start IS NOT NULL AND day_start < ?
-    ORDER BY day_start DESC
-  `).all(chatId, currentDayStart, chatId, currentDayStart);
-
-  // Find most recent Monday's day_start in user's timezone
-  let lastMondayStart = null;
-  for (const { day_start } of allRows) {
-    const dow = new Date(day_start + OFFSET).getUTCDay();
-    if (dow === 1) { lastMondayStart = day_start; break; }
+  // Use last_weekly_review_completed_at as anchor; fall back to earliest log entry for new users
+  let windowStart = userRow.last_weekly_review_completed_at;
+  if (!windowStart) {
+    const firstLog = db.prepare(`SELECT MIN(day_start) as ds FROM (
+      SELECT MIN(day_start) as day_start FROM meal_log WHERE chat_id=? AND day_start IS NOT NULL
+      UNION ALL
+      SELECT MIN(day_start) as day_start FROM workout_log WHERE chat_id=? AND day_start IS NOT NULL
+    )`).get(chatId, chatId);
+    windowStart = firstLog?.ds ?? (currentDayStart - 7 * 86400000);
   }
-  if (!lastMondayStart) return null;
 
-  // Active day_starts from last Monday up to (not including) this Monday
-  const weekDayStarts = allRows
-    .map(r => r.day_start)
-    .filter(ds => ds >= lastMondayStart);
+  // Minimum 5 days of data required before first review
+  if ((currentDayStart - windowStart) / 86400000 < 5) return null;
 
+  // Find distinct day_starts from meals+workouts in the window
+  const allRows = db.prepare(`
+    SELECT DISTINCT day_start FROM meal_log WHERE chat_id=? AND day_start IS NOT NULL AND day_start >= ? AND day_start < ?
+    UNION
+    SELECT DISTINCT day_start FROM workout_log WHERE chat_id=? AND day_start IS NOT NULL AND day_start >= ? AND day_start < ?
+    ORDER BY day_start ASC
+  `).all(chatId, windowStart, currentDayStart, chatId, windowStart, currentDayStart);
+
+  if (!allRows.length) return null;
+
+  const weekDayStarts = allRows.map(r => r.day_start);
   const placeholders = weekDayStarts.map(() => '?').join(',');
 
   const meals      = db.prepare(`SELECT * FROM meal_log WHERE chat_id=? AND day_start IN (${placeholders}) ORDER BY logged_at ASC`).all(chatId, ...weekDayStarts);
   const workouts   = db.prepare(`SELECT * FROM workout_log WHERE chat_id=? AND day_start IN (${placeholders}) ORDER BY logged_at ASC`).all(chatId, ...weekDayStarts);
   // Fetch with buffer — active day lookup in JS handles midnight crossings
-  const sleeps = db.prepare(`SELECT hours_slept, quality, type, bed_time, wake_time, logged_at FROM sleep_log WHERE chat_id=? AND bed_time >= ? AND bed_time < ?`).all(chatId, lastMondayStart - 86400000, currentDayStart + 86400000);
-  const recoveries = db.prepare(`SELECT type, rounds, duration_per_round_min, total_duration_min, temperature_c, protocol, protocol_id, sequence_order, round_number, logged_at FROM recovery_log WHERE chat_id=? AND logged_at > ? AND logged_at <= ?`).all(chatId, lastMondayStart, currentDayStart);
+  const sleeps = db.prepare(`SELECT hours_slept, quality, type, bed_time, wake_time, logged_at FROM sleep_log WHERE chat_id=? AND bed_time >= ? AND bed_time < ?`).all(chatId, windowStart - 86400000, currentDayStart + 86400000);
+  const recoveries = db.prepare(`SELECT type, rounds, duration_per_round_min, total_duration_min, temperature_c, protocol, protocol_id, sequence_order, round_number, logged_at FROM recovery_log WHERE chat_id=? AND logged_at > ? AND logged_at <= ?`).all(chatId, windowStart, currentDayStart);
 
   const dailyTotals = {};
   for (const m of meals) {
@@ -603,15 +648,19 @@ function getWeeklyReviewData(chatId, currentDayStart) {
   }
   const allDayStartsSorted = [...allRows.map(r => r.day_start), currentDayStart].sort((a, b) => a - b);
   const weekDayStartSet = new Set(weekDayStarts);
+  const weekNightSleeps = [];
   for (const s of sleeps) {
     if ((s.type ?? 'Night') !== 'Night') continue;
     const bedMs = s.bed_time || s.wake_time || s.logged_at;
     if (!bedMs) continue;
-    // Find the active day this sleep belongs to across ALL days, then check if it's in this week
+    // Bed-day attribution: the active day at bed time. Fall back to bed_time's own day if that day
+    // had no other activity logged, so a night is never silently dropped.
     let activeDayStart = null;
     for (const ds of allDayStartsSorted) { if (ds <= bedMs) activeDayStart = ds; else break; }
-    if (!activeDayStart || !weekDayStartSet.has(activeDayStart)) continue;
-    const key = new Date(activeDayStart + OFFSET).toISOString().split('T')[0];
+    const anchor = (activeDayStart != null && weekDayStartSet.has(activeDayStart)) ? activeDayStart : bedMs;
+    if (anchor < windowStart || anchor >= currentDayStart) continue;  // outside the reviewed week
+    weekNightSleeps.push(s);
+    const key = new Date(anchor + OFFSET).toISOString().split('T')[0];
     if (!dailyTotals[key]) dailyTotals[key] = { calories: 0, protein: 0, carbs: 0, fat: 0 };
     dailyTotals[key].sleep_h = s.hours_slept;
     dailyTotals[key].sleep_q = s.quality;
@@ -623,9 +672,8 @@ function getWeeklyReviewData(chatId, currentDayStart) {
   }
 
   const trainDaySet = new Set(workouts.map(w => new Date((w.day_start || w.logged_at) + OFFSET).toISOString().split('T')[0]));
-  const nightSleeps = sleeps.filter(s => (s.type ?? 'Night') === 'Night');
-  const avgSleep = nightSleeps.length ? Math.round(nightSleeps.reduce((s, r) => s + (r.hours_slept || 0), 0) / nightSleeps.length * 10) / 10 : null;
-  const avgSleepQuality = nightSleeps.length ? Math.round(nightSleeps.reduce((s, r) => s + (r.quality || 3), 0) / nightSleeps.length * 10) / 10 : null;
+  const avgSleep = weekNightSleeps.length ? Math.round(weekNightSleeps.reduce((s, r) => s + (r.hours_slept || 0), 0) / weekNightSleeps.length * 10) / 10 : null;
+  const avgSleepQuality = weekNightSleeps.length ? Math.round(weekNightSleeps.reduce((s, r) => s + (r.quality || 3), 0) / weekNightSleeps.length * 10) / 10 : null;
   const recoverySessions = recoveries.map(r => ({ date: new Date(r.logged_at + OFFSET).toISOString().split('T')[0], type: r.type, rounds: r.rounds, duration_per_round_min: r.duration_per_round_min, total_duration_min: r.total_duration_min, temperature_c: r.temperature_c, protocol: r.protocol, protocol_id: r.protocol_id, sequence_order: r.sequence_order, round_number: r.round_number }));
 
   const allBody = db.prepare('SELECT weight_kg, body_fat_pct, muscle_mass_kg, logged_at FROM body_log WHERE chat_id=? ORDER BY logged_at ASC').all(chatId);
@@ -655,6 +703,17 @@ function saveSleepLog(chatId, { bed_time, wake_time, hours_slept, quality, notes
 
 function getLastSleepLog(chatId) {
   return db.prepare('SELECT bed_time, wake_time, hours_slept, quality FROM sleep_log WHERE chat_id=? ORDER BY id DESC LIMIT 1').get(chatId) || null;
+}
+
+// Fill in the quality on the sleep row that's still awaiting a rating (set at wake).
+// Returns the sleep_log id if a row was updated, or null if nothing was pending.
+function setSleepQuality(chatId, quality) {
+  const st = getState(chatId);
+  const id = st?.open_sleep_log_id;
+  if (!id) return null;
+  db.prepare('UPDATE sleep_log SET quality=? WHERE id=?').run(quality, id);
+  setState(chatId, { open_sleep_log_id: null });
+  return id;
 }
 
 // ── Chat history ──────────────────────────────────────────────────────────────
@@ -821,7 +880,8 @@ function getTargets(chatId) {
 
 function getTargetsText(chatId) {
   const t = getTargets(chatId);
-  return `Current weight: ~${t.weight_kg}kg, goal: ${t.goal_weight}kg\nDaily targets: ${t.calories} kcal / ${t.protein}g protein / ${t.carbs}g carbs / ${t.fat}g fat`;
+  if (!t) return 'No targets set yet.';
+  return `Current weight: ~${t.weight_kg ?? '?'}kg, goal: ${t.goal_weight ?? '?'}kg\nDaily targets: ${t.calories ?? '?'} kcal / ${t.protein ?? '?'}g protein / ${t.carbs ?? '?'}g carbs / ${t.fat ?? '?'}g fat`;
 }
 
 function updateTargets(chatId, updates) {
@@ -911,11 +971,12 @@ module.exports = {
   logMessage, wasRecentlyActive,
   saveReminder, getPendingReminders, markReminderFired, cleanOldReminders, getReminderByTime, cancelPlanReminders, deleteUnfiredReminders,
   saveHistory, getHistory,
+  setPendingStateDb, getPendingStateDb, hasPendingStateDb, deletePendingStateDb,
 upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKnownFoods,
   upsertKnownExercise, getKnownExercises,
   getTargetsFromDb, setTargetsInDb,
   saveMealLog, getDayDataFromSQLite, getDailyMealTotalsFromSQLite,
-  saveWorkoutLog, getRecentWorkouts, saveRecoveryLog, saveSleepLog, getLastSleepLog,
+  saveWorkoutLog, getRecentWorkouts, saveRecoveryLog, saveSleepLog, getLastSleepLog, setSleepQuality,
   getTodayEntriesFromSQLite, deleteTodayEntry, getWeekDataFromSQLite, getWeeklyReviewData,
   setLogBotMessageId, getLogByBotMessageId, renameLog, getLastLogEntry, getRecentLogs,
   saveBodyLog, getLastBodyMeasurement, getAllBodyMeasurements, getBodyLogsRaw, getHistoricalDataFromSQLite,
