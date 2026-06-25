@@ -1367,7 +1367,7 @@ async function parseRenameIntent(text, recentLogs = []) {
 
 async function isConversationContinuation(newMessage, previousSummary) {
   const resp = await anthropic.messages.create({
-    model: HAIKU, max_tokens: 5, temperature: 0,
+    model: SONNET, max_tokens: 5, temperature: 0, // kept on Sonnet: Haiku over-inherits on nuanced continuation judgments (regression caught in tests)
     system: `A user just sent a new message. You have a summary of their most recent conversation with a health coach.
 Reply YES only if the previous conversation provides direct, specific context that meaningfully changes how you'd answer the new message — for example, a recommendation you made, a problem they described, or a decision that was reached.
 Reply NO if the connection is only superficial (both mention food, both mention health) or if the previous conversation is on a clearly different topic.

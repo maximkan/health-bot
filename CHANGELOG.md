@@ -6,7 +6,8 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ### Cost/latency pass — batch 1 (B3 parsers→code, B6 model fixes)
 - **`nameWorkout` is now pure code, not an AI call.** Live-workout naming (Leg Day / Upper Body / Mixed Strength & Cardio / etc.) is a deterministic keyword lookup — instant, free, and verified to reproduce the AI's labels on real sessions (8/8). — `claude.js`
-- **Cheaper model for two helper calls:** `isConversationContinuation` (does this message continue the last chat?) and `parseCorrection` (what kind of correction is this?) moved from Sonnet → Haiku — same results, ~3–5× cheaper. — `claude.js`
+- **Cheaper model for `parseCorrection`** (what kind of correction is this?): Sonnet → Haiku — same results, ~3–5× cheaper. — `claude.js`
+- (Tried `isConversationContinuation` → Haiku too, but tests caught Haiku over-inheriting context on a nuanced case — reverted to Sonnet. Low-volume call, so no real loss.)
 - **Proactive nudge skips the AI when there's nothing to flag.** The nudge prompt already returns "OK" when no item is flagged, so we now skip the Sonnet call entirely on those ticks (most of them). — `cron.js`
 - (Kept `recalculateTargets` on Sonnet — rare and high-stakes nutrition math; `parseSleepQuality` stays AI — it needs to tell a real rating from an incidental number like "had 4 eggs".)
 
