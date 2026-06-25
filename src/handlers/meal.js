@@ -1,6 +1,36 @@
 const claude = require('../claude');
 const db     = require('../db');
 const { MEAL_PREVIEW_KB } = require('../utils/keyboards');
+
+// B5: strict menu lookup. Returns a known_foods row ONLY when the message resolves to exactly one
+// of today's menu items with the variant pinned and no modifiers — otherwise null (→ AI handles it).
+// Safety property: any ambiguity/modifier/novelty → null → today's exact AI behavior. Never a wrong log.
+function matchKnownMeal(caption, foods) {
+  const lc = (caption || '').toLowerCase().trim();
+  // Must name a meal type we can scope to (lunch/dinner menus are day-tagged).
+  const meal = /\blunch\b/.test(lc) ? 'lunch' : /\bdinner\b/.test(lc) ? 'dinner' : null;
+  if (!meal) return null;
+  // Any quantity / partial / exclusion → let the AI recompute (this is the user's correctness concern).
+  if (/\d|%|\b(half|quarter|without|no|skip|only|less|more|light|didn'?t|instead|minus|extra|plus|some|bit|grams?|ml)\b/.test(lc)) return null;
+  // Variant must be explicit — the menu lists Regular AND Double for each dish, so absence is ambiguous.
+  const variant = /\bdouble\b/.test(lc) ? 'double' : /\bregular\b/.test(lc) ? 'regular' : null;
+  if (!variant) return null;
+  const STOP = new Set(['had','ate','eat','eaten','just','i','a','an','the','for','today','also','and','my','ns','lunch','dinner','regular','double','plate','plates','meal','with','got','having','have','at']);
+  const keywords = lc.replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(w => w && !STOP.has(w));
+  if (!keywords.length) return null;
+  const cand = foods.filter(f => {
+    const name  = (f.name  || '').toLowerCase();
+    const notes = (f.notes || '').toLowerCase();
+    if (notes.includes('cafe') || notes.includes('beverage')) return false; // drinks carry caffeine the table doesn't store → AI
+    const isMeal = meal === 'lunch'
+      ? (notes.startsWith('lunch') || (name.includes('week]') && !name.includes('[dinner')))
+      : (notes.startsWith('dinner') || name.includes('[dinner'));
+    if (!isMeal) return false;
+    if (!name.includes(variant)) return false;
+    return keywords.every(k => name.includes(k));
+  });
+  return cand.length === 1 ? cand[0] : null; // 0 or ambiguous → AI
+}
 const { getDayOfWeekTz, nowContextTz, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 
@@ -69,6 +99,19 @@ async function showMealPreview(bot, msg, photos) {
     try { knownFoodsCtx = db.getKnownFoodsContext(chatId, dayOfWeek, weekType); } catch {}
 
     const institutionKeywords = userState?.institution_keywords || null;
+
+    // B5: skip the AI when the message resolves to exactly one of today's menu items (text-only).
+    if (!hasPhoto && caption) {
+      try {
+        const m = matchKnownMeal(caption, db.getKnownFoodsForDay(chatId, dayOfWeek, weekType));
+        if (m) {
+          const t = { calories: Math.round(m.calories), protein: Math.round(m.protein), carbs: Math.round(m.carbs), fat: Math.round(m.fat) };
+          const data = { meal_name: m.name, _hasPhoto: false, items: [{ name: m.name, ...t }], totals: t, caffeine_mg: 0, confidence: 'high', _fromKnownFood: true };
+          await bot.sendMessage(chatId, formatPreview(data), MEAL_PREVIEW_KB);
+          return data;
+        }
+      } catch (e) { console.error('Known-meal match error:', e.message); /* fall through to AI */ }
+    }
 
     let captionWithCtx = caption;
     if (userState?.current_chain_id) {
@@ -139,4 +182,4 @@ async function applyCorrection(bot, chatId, existingData, correctionText) {
   }
 }
 
-module.exports = { showMealPreview, logMeal, applyCorrection, formatPreview, formatConfirmation };
+module.exports = { showMealPreview, logMeal, applyCorrection, formatPreview, formatConfirmation, matchKnownMeal };
