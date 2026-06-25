@@ -7,6 +7,11 @@ const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const SONNET = 'claude-sonnet-4-6';
 
+// Wrap a static system prompt for prompt caching — cuts repeated input cost when the SAME prompt is
+// re-hit within ~5 min (multi-turn coaching, back-to-back meals). Only worth it on large, reused
+// prompts; one-off daily calls are intentionally NOT cached (the cache-write premium would cost more).
+const cached = (text) => [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
+
 function parseJSON(text) {
   const codeBlock = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const raw = codeBlock ? codeBlock[1] : text;
@@ -199,7 +204,7 @@ async function analyzeMeal(photoBase64OrArray, caption, dayOfWeek, knownFoodsCon
   content.push({ type: 'text', text });
 
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 2048, temperature: 0, system: MEAL_SYSTEM,
+    model: SONNET, max_tokens: 2048, temperature: 0, system: cached(MEAL_SYSTEM),
     messages: [{ role: 'user', content }],
   });
   const parsed = parseJSON(response.content[0].text);
@@ -974,7 +979,7 @@ async function askCoach(question, context = '', targetsContext = '', knownFoodsC
   let userContent = context ? `${context}\n\nQuestion: ${question}` : question;
   if (knownFoodsContext) userContent = `Known foods for today:\n${knownFoodsContext}\n\n${userContent}`;
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 1024, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile, userProfile.vacation_mode),
+    model: SONNET, max_tokens: 1024, system: cached(buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile, userProfile.vacation_mode)),
     messages: [{ role: 'user', content: userContent }],
   });
   return response.content[0].text;
@@ -997,7 +1002,7 @@ async function askWithPhoto(photoBase64, caption, targetsContext = '', userProfi
 
 async function continueCoachReply(messages, targetsContext = '', userProfile = {}) {
   const response = await anthropic.messages.create({
-    model: SONNET, max_tokens: 1024, system: buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile, userProfile.vacation_mode),
+    model: SONNET, max_tokens: 1024, system: cached(buildCoachSystem(targetsContext, userProfile.coaching_style, userProfile.language, userProfile.name, userProfile.user_profile, userProfile.vacation_mode)),
     messages,
   });
   return response.content[0].text;

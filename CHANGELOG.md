@@ -4,6 +4,10 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-25
 
+### Cost/latency pass — batch 4 (B2 fewer classify calls, B4 prompt caching)
+- **One classify call per message instead of two (B2).** The router used to run a no-history rename check AND a history-aware classify on every message. Now it runs the history-aware classify once; the no-history rename re-check only fires when the first pass found nothing actionable (where a history-poisoned rename would land). Most messages — logs, workouts, plans, coach questions — are now ~1 Haiku round-trip faster. Rename still works (verified). — `bot.js`
+- **Prompt caching on the reused Sonnet prompts (B4).** The big meal-analysis prompt and the coaching prompt are now cached, so back-to-back meals and multi-turn coaching pay ~10% instead of 100% for re-sending the same system prompt. One-off daily calls (summaries, weekly review, proactive) are intentionally NOT cached — caching a once-a-day call costs more, not less. Verified caching engages (cache read confirmed) and coach answers are unchanged. — `claude.js`
+
 ### Cost/latency pass — batch 3 (B5 instant repeat-food logging)
 - **Any food you log the same way logs instantly, no AI** — works for every user, not just menu users. When a text message resolves to exactly one of your known foods (a yogurt, a smoothie, a protein shake, or a fully-specified menu item like "double chicken lunch sweet potato"), the macros come straight from `known_foods`. Day-specific menus are scoped to today; plain repeats match by name. — `handlers/meal.js`
 - **Day-scoped like the AI:** a menu reference (protein + variant + carb, e.g. "double beef sweet potato") matches **today's** menu; stale cross-day auto-saved copies are ignored so they can't cause false ambiguity. Matches the existing AI behavior exactly, just instant.

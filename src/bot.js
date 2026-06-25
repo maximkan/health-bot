@@ -560,22 +560,24 @@ function startBot() {
     let earlyIntents = [];
     if (msg.text) {
       await bot.sendChatAction(chatId, 'typing');
-      // RENAME is classified without history — history can get poisoned by past failed attempts
-      // Skip RENAME check if we're in the middle of a meal flow — user is clarifying/confirming, not renaming
+      // One history-aware classify per message (was two). RENAME is normally caught here; a
+      // history-POISONED rename lands as GENERAL/COACH_QUESTION, so we only fall back to a
+      // no-history re-check in that case — most messages now pay a single Haiku call.
       const mealFlowTypes = new Set(['meal_confirm', 'meal_text_clarification', 'meal_photo_clarification']);
       const inMealFlow = mealFlowTypes.has(pendingStates.get(chatId)?.type);
-      if (!inMealFlow) {
-        const renameCheck = await claude.classify(msg.text, []).catch(() => []);
-        if (renameCheck.includes('RENAME')) {
-          await handleRename(bot, msg, chatId);
-          return;
-        }
-      }
       const history = db.getHistory(chatId, 10);
       try { earlyIntents = await claude.classify(msg.text, history); } catch {}
       if (!inMealFlow && earlyIntents.includes('RENAME')) {
         await handleRename(bot, msg, chatId);
         return;
+      }
+      // Poisoned-rename recovery: only when the history-aware pass found nothing actionable.
+      if (!inMealFlow && (!earlyIntents.length || earlyIntents.every(i => i === 'GENERAL' || i === 'COACH_QUESTION'))) {
+        const renameCheck = await claude.classify(msg.text, []).catch(() => []);
+        if (renameCheck.includes('RENAME')) {
+          await handleRename(bot, msg, chatId);
+          return;
+        }
       }
     }
     // BED: explicit phrases are unambiguous — don't let history poison them
