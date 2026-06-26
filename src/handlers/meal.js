@@ -13,6 +13,8 @@ const _CAFFEINE_RE = /\b(coffee|espresso|latte|cappuccino|americano|mocha|macchi
 // distinctive words of a food name: drop [bracket tags] (week/source noise) but KEEP (paren) base words.
 const _words = (s) => String(s || '').toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(w => w && !_FILLER.has(w));
 const _identity = (set) => [...set].sort().join(' ');
+// Strip internal [bracket] tags (day/week/source markers) from a known-food name for user-facing display.
+const cleanFoodName = (s) => String(s || '').replace(/\s*\[[^\]]*\]/g, '').replace(/\s{2,}/g, ' ').trim();
 
 function matchKnownMeal(caption, foods) {
   const lc = (caption || '').toLowerCase().trim();
@@ -115,7 +117,8 @@ async function showMealPreview(bot, msg, photos) {
         const m = matchKnownMeal(caption, db.getKnownFoodsForDay(chatId, dayOfWeek, weekType));
         if (m) {
           const t = { calories: Math.round(m.calories), protein: Math.round(m.protein), carbs: Math.round(m.carbs), fat: Math.round(m.fat) };
-          const data = { meal_name: m.name, _hasPhoto: false, items: [{ name: m.name, ...t }], totals: t, caffeine_mg: 0, confidence: 'high', _fromKnownFood: true };
+          const name = cleanFoodName(m.name); // hide internal [Odd Week]/[Dinner Tue] day markers from the user
+          const data = { meal_name: name, _hasPhoto: false, items: [{ name, ...t }], totals: t, caffeine_mg: 0, confidence: 'high', _fromKnownFood: true };
           await bot.sendMessage(chatId, formatPreview(data), MEAL_PREVIEW_KB);
           return data;
         }

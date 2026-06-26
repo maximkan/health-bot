@@ -2,6 +2,11 @@
 
 All notable changes to the health-bot, newest first. Each entry says what changed and why, in plain terms, with the files touched. (Work predating this file lives in git history.)
 
+## 2026-06-26
+
+### Data-quality — food display cleanup
+- **Internal day/week markers no longer leak into logged meal names.** B5 was logging the raw known-food name including tags like "[Odd Week]" / "[Dinner Tue Odd]"; those are internal DB markers for day determination, not user-facing. Now stripped from the displayed/logged name (dish + base + variant kept). Verified clean across every day of the week, both odd/even, lunch + dinner. — `handlers/meal.js`
+
 ## 2026-06-25
 
 ### Cost/latency pass — batch 4 (B2 fewer classify calls, B4 prompt caching)
