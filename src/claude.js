@@ -373,7 +373,13 @@ async function parseWorkout(text, knownExercisesCtx = '', weight_kg) {
 }
 
 async function applyWorkoutCorrection(existingData, correction) {
-  const prompt = `Current workout data:\n${JSON.stringify(existingData, null, 2)}\n\nUser correction: "${correction}"\n\nApply the correction:\n- If user says exercises were missed/skipped, ADD them to the exercises array\n- If user changes duration/intensity, recalculate calories_burned\n- Only modify what was mentioned\nReturn the complete updated JSON with same structure.`;
+  const prompt = `Current workout data:\n${JSON.stringify(existingData, null, 2)}\n\nUser correction: "${correction}"\n\nApply the correction:
+- If exercises were missed/skipped, ADD them to the exercises array.
+- If the user changes the DURATION ("it was 90 min", "only 30 minutes"), update duration_min (calories will be recomputed from it).
+- If the user REDEFINES the activity ("count it as a 5km walk", "it was golf with a cart", "treat as easy cardio"), change BOTH workout_name and activity_type to match the new activity, so calories recompute correctly for it (e.g. activity_type "walk", "golf cart", "cycling").
+- If the user MANUALLY sets calories ("make it 600", "burned about 400", "way less ~500"), set calories_burned to that number AND add "calories_locked": true so it is NOT recomputed. For a vague "way less"/"way more" with no number, estimate a sensible value and set "calories_locked": true.
+- Only modify what was mentioned.
+Return the complete updated JSON with the same structure (you may add "calories_locked": true).`;
   const response = await anthropic.messages.create({
     model: SONNET, max_tokens: 1024, temperature: 0,
     system: 'You are a workout data editor. Apply corrections to workout JSON precisely. Return only valid JSON with same structure.',

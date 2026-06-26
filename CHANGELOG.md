@@ -4,6 +4,11 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
+### Workout mutation + golf variants (#1, #2)
+- **Workout corrections now stick (#2).** "make it 600 cal" / "way less, like half" → honored (manual override, no longer overwritten by the MET recompute); "count it as a 5km walk" / "golf with a cart" → re-classifies the activity and recomputes with the right MET. — `claude.js` (applyWorkoutCorrection), `bot.js`
+- **Golf is asked how it was played (#1).** A golf preview now shows 🚶 Walking / 🛺 Cart / 🎯 Range buttons (unless the variant is already clear) — tapping recomputes with the correct MET: Walking 4.3, Cart 3.5, Driving Range 3.0 (research/Compendium values; range corrected 3.5→3.0). Defaults to walking if you just log. — `bot.js`, `handlers/workout.js`, `utils/keyboards.js`, seed
+- Recommendation noted for the driving range: time-based (MET 3.0), optionally refined by intensity; ball-count is a poor calorie proxy.
+
 ### Exercise library — integration (the 5 fixes)
 - **Sports calories fixed.** `computeWorkoutCalories` now looks up the catalog MET for cardio/sports — tennis 60min/100kg went from 351 kcal (wrong MET 3.5) to **732 kcal (MET 7.3)**; golf-18-holes → 4.3, hiking → 6.0, yoga → 2.5. Strength stays density-based. Per-user weight handling was already correct (uses latest weigh-in). — `handlers/workout.js`, `db.js`
 - **Exercise names standardized on log.** Each logged exercise resolves to a canonical catalog name via a shared normalizer (case + plural + safe stemming — "Jumping Squats" = "jump squats", "running" = "run"). Kills new duplicates. — `db.js`, `utils/exnorm.js`, `handlers/workout.js`, `bot.js`

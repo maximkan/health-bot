@@ -1,7 +1,7 @@
 const claude = require('../claude');
 const db     = require('../db');
 const { calculateTDEE } = require('../utils/tdee');
-const { WORKOUT_PREVIEW_KB } = require('../utils/keyboards');
+const { WORKOUT_PREVIEW_KB, GOLF_PREVIEW_KB } = require('../utils/keyboards');
 const { getOffsetMs, requireTimezone } = require('../utils/time');
 
 // exerciseHistory: Map<normalizedName, {exercise, date, workoutName}>
@@ -303,7 +303,10 @@ async function showWorkoutPreview(bot, msg) {
     if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
     canonicalizeWorkoutExercises(chatId, data);
     data.calories_burned = computeWorkoutCalories(chatId, data);
-    await bot.sendMessage(chatId, formatWorkoutPreview(data), WORKOUT_PREVIEW_KB);
+    // Golf: offer how-played buttons (walking/cart/range change the MET) unless the variant is already clear
+    const isGolf = /golf/i.test(data.workout_name || '') || /golf/i.test(data.activity_type || '');
+    const variantClear = /cart|driving range|walking|carry|pull/i.test((data.workout_name || '') + ' ' + (data.activity_type || ''));
+    await bot.sendMessage(chatId, formatWorkoutPreview(data), (isGolf && !variantClear) ? GOLF_PREVIEW_KB : WORKOUT_PREVIEW_KB);
     return data;
   } catch (err) {
     console.error('Workout preview error:', err.message, err.stack);
