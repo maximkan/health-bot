@@ -4,6 +4,10 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
+### Exercise library — foundation (catalog seed)
+- **New `exercise_catalog` table, seeded with 907 entries.** 868 strength/mobility exercises from the open free-exercise-db (canonical name, muscles, equipment, mechanic) + a curated 39-entry cardio/sport MET table from the Compendium of Physical Activities (Tennis 7.3, Golf-walking 4.3, Hiking 6.0, Yoga 2.5, …). 89 exercises auto-flagged unilateral (lunges/split squats/step-ups/one-arm) to fix per-side rep counting. — `scripts/seed-exercise-catalog.js`
+- Not wired into the bot yet (no behavior change). Next: resolve-on-log (alias matching), catalog-MET calorie lookup (fixes tennis/golf being computed at the wrong ~3.5 MET), unilateral rep handling, history normalization migration, and custom-exercise creation.
+
 ### Data-quality — food display cleanup
 - **Internal day/week markers no longer leak into logged meal names.** B5 was logging the raw known-food name including tags like "[Odd Week]" / "[Dinner Tue Odd]"; those are internal DB markers for day determination, not user-facing. Now stripped from the displayed/logged name (dish + base + variant kept). Verified clean across every day of the week, both odd/even, lunch + dinner. — `handlers/meal.js`
 
