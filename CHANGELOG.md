@@ -2,18 +2,15 @@
 
 All notable changes to the health-bot, newest first. Each entry says what changed and why, in plain terms, with the files touched. (Work predating this file lives in git history.)
 
+## 2026-06-27
+
+### Meal preview — estimate + buttons, no more re-asking
+- **A low-confidence meal no longer blocks you with a question.** If there's a usable estimate, you always get the preview + ✅ Log · ✏️ Edit · ❌ Cancel, with any caveat demoted to a one-line ⓘ hint ("assumed ~165 kcal/100g — edit if off"). Only a genuinely unloggable meal (no estimate at all) still asks. Faster, and Edit was always the real escape. — `handlers/meal.js`
+
+### "I'm planning to…" is a question, not a plan
+- **Asking for advice about a future activity no longer creates a phantom plan.** "I'm planning to wake up early for a sauna + cold plunge — what's best?" used to schedule a 6am reminder AND answer; now it's just answered. Explicit scheduling ("gym tomorrow at 10am", "remind me to…") still creates a plan. — `claude.js` (classifier)
+
 ## 2026-06-26
-
-### Restaurant meals — per-item places + resolver (#3, rebuilt via council)
-- **Place is now per-DISH, not per-message** — you can log several dishes from different places at once. The bot reads the places you state and asks (one tap each) only for the dishes it still doesn't know.
-  - "pizza from Tony's, homemade pasta, milkshake from Shake Shack" → 0 taps, three places captured from your words.
-  - "pizza and carbonara from Luigi's" → both @ Luigi's (a trailing place applies to the whole list).
-  - "carbonara from Luigi's and a milkshake" → asks ONLY the milkshake (carbonara already placed).
-  - Each unplaced dish gets `📍 saved venues · 🏠 Home · 🆕 New place · 🤖 Estimate`. **🤖 Estimate** = just use the standard AI estimate, no venue — a one-tap escape so a place question is never a blocker.
-- **The NS / generic picker bug is fixed structurally** — institution (NS) items and generic foods (banana, eggs, coffee) are marked `n/a` and can never trigger a place question. (Was: an NS Caesar + roast beef wrongly showed Home/Other.)
-- **Fixed a real bug**: picking a venue used to collapse the whole meal to one item — now it swaps just that item's macros and re-sums. Corrections keep a venue you already chose. — `claude.js` (per-item place/place_state + trailing-place rule), `handlers/meal.js` (resolver: firstAskableItem/renderMealStep/applyItemVariant/carryPlaces), `bot.js` (per-item pl:item callbacks)
-- Shortcuts (one-tap "same place for all" + known-combo row) are the next phase.
-
 
 ### Meal logging fixes (NS + estimate)
 - **A simple food you add to an institution meal is now just estimated, not re-asked.** Logging "caesar salad from NS and 200g of lean roast beef" used to stop and ask "is the roast beef from NS too?", and answering it re-analyzed the whole meal from scratch — which made the roast beef's calories swing (lean → "usual" → 500). Now a common identifiable food that isn't on the menu is estimated at high confidence with no question; only genuinely unidentifiable items still ask. — `claude.js` (KNOWN FOODS RULES)
