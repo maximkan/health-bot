@@ -1,7 +1,7 @@
 const claude = require('../claude');
 const db     = require('../db');
 const { calculateTDEE } = require('../utils/tdee');
-const { WORKOUT_PREVIEW_KB, GOLF_TYPE_KB, GOLF_COURSE_KB, GOLF_RANGE_KB } = require('../utils/keyboards');
+const { WORKOUT_PREVIEW_KB } = require('../utils/keyboards');
 const { getOffsetMs, requireTimezone } = require('../utils/time');
 
 // exerciseHistory: Map<normalizedName, {exercise, date, workoutName}>
@@ -302,27 +302,15 @@ async function showWorkoutPreview(bot, msg) {
     const data = await claude.parseWorkout(msg.text || msg.caption || '', knownCtx, userWeight);
     if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
     canonicalizeWorkoutExercises(chatId, data);
-    // Golf: context-aware. Estimate duration if missing (never block), set the MET-determining activity
-    // when it's already clear, and only show the relevant question otherwise.
-    let kb = WORKOUT_PREVIEW_KB;
-    const gtxt = ((data.workout_name || '') + ' ' + (data.activity_type || '')).toLowerCase();
-    if (/golf/.test(gtxt)) {
-      if (!data.duration_min) {
-        const holes = (gtxt.match(/(\d+)\s*hole/) || [])[1];
-        const balls = (gtxt.match(/(\d+)\s*ball/) || [])[1];
-        data.duration_min = /sim/.test(gtxt) ? 60
-          : /range|driving|ball|bucket/.test(gtxt) ? (balls ? Math.round(balls / 150 * 45) : 45)
-          : (holes ? Math.round(holes / 18 * 240) : 240);
-      }
-      if (/sim/.test(gtxt))                         data.activity_type = 'golf simulator';
-      else if (/\bcart\b|buggy/.test(gtxt))          data.activity_type = 'golf cart';
-      else if (/walking|carry|carried|pull/.test(gtxt)) data.activity_type = 'golf walking';
-      else if (/range|driving|ball|bucket/.test(gtxt)) { data.activity_type = 'driving range'; kb = GOLF_RANGE_KB; }
-      else if (/hole|course|round/.test(gtxt))       kb = GOLF_COURSE_KB;
-      else                                           kb = GOLF_TYPE_KB;
+    // Golf goes through the button wizard (gathers type/variant/holes/balls/duration) — flag it and let
+    // the router start the wizard instead of showing a preview now. Keep the raw text for parsing.
+    if (/golf/i.test((data.workout_name || '') + ' ' + (data.activity_type || ''))) {
+      data._golfWizard = true;
+      data._rawText = msg.text || msg.caption || '';
+      return data;
     }
     data.calories_burned = computeWorkoutCalories(chatId, data);
-    await bot.sendMessage(chatId, formatWorkoutPreview(data), kb);
+    await bot.sendMessage(chatId, formatWorkoutPreview(data), WORKOUT_PREVIEW_KB);
     return data;
   } catch (err) {
     console.error('Workout preview error:', err.message, err.stack);

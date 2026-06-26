@@ -17,7 +17,7 @@ const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { nowContextTz, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
 const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
-const { MEAL_PREVIEW_KB, WORKOUT_PREVIEW_KB, LIVE_WORKOUT_KB, GOLF_TYPE_KB, GOLF_COURSE_KB, GOLF_RANGE_KB } = require('./utils/keyboards');
+const { MEAL_PREVIEW_KB, WORKOUT_PREVIEW_KB, LIVE_WORKOUT_KB } = require('./utils/keyboards');
 
 // DB-backed so in-flight conversation flows survive process restarts. Same .set/.get/.has/.delete
 // API as the old Map (better-sqlite3 is synchronous, so this is a drop-in). Code that MUTATES a
@@ -208,7 +208,10 @@ async function dispatchIntents(bot, msg, chatId, userState, intents) {
       }
       case 'WORKOUT_LOG': {
         const wData = await showWorkoutPreview(bot, msg);
-        if (wData) {
+        if (wData && wData._golfWizard) {
+          await golfStart(bot, chatId, wData, msg._catchupRetro);
+          workoutQueued = true;
+        } else if (wData) {
           setPendingState(chatId, { type: 'workout_confirm', workoutData: wData, catchupRetro: msg._catchupRetro });
           workoutQueued = true;
         }
@@ -435,30 +438,141 @@ async function workoutButtonAction(bot, chatId, action) {
   if (state.catchupRetro) { await bot.sendMessage(chatId, 'anything else? (or done)'); setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro }); }
 }
 
-const _GOLF_MET = { walking: 4.3, cart: 3.5, simulator: 2.5, light: 2.5, moderate: 3.0, hard: 3.5 };
-// kind: gt (type) | gv (course variant) | gi (range intensity)
-async function golfAction(bot, chatId, kind, value) {
-  const state = pendingStates.get(chatId);
-  if (!state || state.type !== 'workout_confirm') return;
-  if (kind === 'gt') { // type picked → show the relevant sub-question, or apply simulator directly
-    if (value === 'course') return bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData), GOLF_COURSE_KB);
-    if (value === 'range')  return bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData), GOLF_RANGE_KB);
-    if (value === 'sim')    return applyGolfMet(bot, chatId, state, 2.5, 'Simulator', 'golf simulator');
-    return;
-  }
-  if (kind === 'gv') return applyGolfMet(bot, chatId, state, _GOLF_MET[value], value === 'cart' ? 'Cart' : 'Walking', 'golf ' + value);
-  if (kind === 'gi') return applyGolfMet(bot, chatId, state, _GOLF_MET[value], value[0].toUpperCase() + value.slice(1), 'driving range');
+// ── Golf logging wizard ───────────────────────────────────────────────────────
+// Golf calories need real data (a round is 3–5h; "did simulator" tells us nothing).
+// So we gather it with quick buttons — only asking what the user didn't already say.
+//   Course → walking/cart + holes + duration   (duration drives calories: you're active throughout)
+//   Range  → intensity + balls + duration       (duration drives calories)
+//   Sim    → holes only                         (no walking + shared bays inflate wall-clock, so
+//                                                 holes is the honest proxy → derived active time)
+const _GOLF_MET = { walking: 4.3, cart: 3.5, light: 2.5, moderate: 3.0, hard: 3.5, sim: 2.5 };
+const _SIM_MIN_PER_HOLE = 4; // active stand-and-swing time per sim hole, per person
+const _golfRow = (btns) => btns.map(([t, d]) => ({ text: t, callback_data: d }));
+const _GOLF_CANCEL = [{ text: '❌ Cancel', callback_data: 'gw:cancel:1' }];
+
+function golfParse(text) {
+  const t = (text || '').toLowerCase();
+  const gtype = /\bsim|simulator|indoor|trackman|topgolf/.test(t) ? 'sim'
+    : /range|driving|bucket|hit balls|hitting balls/.test(t) ? 'range'
+    : /hole|on course|the course|18|9 |round of golf|played a round/.test(t) ? 'course' : null;
+  const holes = (t.match(/(\d+)\s*hole/) || [])[1];
+  const balls = (t.match(/(\d+)\s*ball/) || [])[1];
+  const durH = (t.match(/(\d+(?:\.\d+)?)\s*(?:h\b|hr|hour)/) || [])[1];
+  const durM = (t.match(/(\d+)\s*(?:min|minute)/) || [])[1];
+  return {
+    gtype,
+    holes: holes ? +holes : null,
+    balls: balls ? +balls : null,
+    duration_min: durH ? Math.round(+durH * 60) : durM ? +durM : null,
+    variant: /\bcart\b|buggy|golf cart/.test(t) ? 'cart' : /walk|carry|carried|push|pull/.test(t) ? 'walking' : null,
+    intensity: /\bhard|intense|vigorous|sweat/.test(t) ? 'hard' : /\bmoderate|medium\b/.test(t) ? 'moderate' : /\blight|easy|casual|chill/.test(t) ? 'light' : null,
+  };
 }
-async function applyGolfMet(bot, chatId, state, met, label, activityType) {
-  if (!met) return;
-  const wd = state.workoutData;
+
+async function golfStart(bot, chatId, workoutData, catchupRetro) {
+  // Parse from the user's actual words, NOT the AI's workout_name — the parser may guess "18 holes"
+  // when the user never said it, which would skip the type question. Fall back to the name only if
+  // we somehow have no raw text (e.g. a bare photo caption).
+  const p = golfParse(workoutData._rawText || workoutData.workout_name || '');
+  const st = {
+    type: 'golf_setup', workoutData, catchupRetro,
+    gtype: p.gtype, variant: p.variant, intensity: p.intensity,
+    holes: p.holes, balls: p.balls, duration_min: p.duration_min,
+  };
+  setPendingState(chatId, st);
+  await golfAsk(bot, chatId, pendingStates.get(chatId));
+}
+
+function golfNextNeed(st) {
+  const order = st.gtype === 'course' ? ['variant', 'holes', 'duration']
+    : st.gtype === 'range' ? ['intensity', 'balls', 'duration']
+    : ['holes']; // sim
+  for (const p of order) {
+    if (p === 'variant' && !st.variant) return 'variant';
+    if (p === 'intensity' && !st.intensity) return 'intensity';
+    if (p === 'holes' && st.holes == null) return 'holes';
+    if (p === 'balls' && st.balls == null) return 'balls';
+    if (p === 'duration' && st.duration_min == null) return 'duration';
+  }
+  return null;
+}
+
+async function golfAsk(bot, chatId, st) {
+  if (!st.gtype) {
+    return bot.sendMessage(chatId, '⛳ How did you play?', { reply_markup: { inline_keyboard: [
+      _golfRow([['⛳ Course', 'gw:type:course'], ['🎯 Range', 'gw:type:range'], ['🖥 Simulator', 'gw:type:sim']]), _GOLF_CANCEL ] } });
+  }
+  const need = golfNextNeed(st);
+  if (!need) return golfFinish(bot, chatId, st);
+  const Q = {
+    variant:   ['🏌️ Walking or cart?',  [['🚶 Walking', 'gw:variant:walking'], ['🛺 Cart', 'gw:variant:cart']]],
+    intensity: ['🎯 How hard did you hit?', [['😌 Light', 'gw:intensity:light'], ['💪 Moderate', 'gw:intensity:moderate'], ['🔥 Hard', 'gw:intensity:hard']]],
+    holes:     ['⛳ How many holes?',    [['9', 'gw:holes:9'], ['18', 'gw:holes:18'], ['✏️ Other', 'gw:holes:other']]],
+    balls:     ['🎯 How many balls?',    [['50', 'gw:balls:50'], ['100', 'gw:balls:100'], ['150', 'gw:balls:150'], ['✏️ Other', 'gw:balls:other']]],
+    duration:  st.gtype === 'range'
+      ? ['⏱ How long?', [['30m', 'gw:dur:30'], ['45m', 'gw:dur:45'], ['1h', 'gw:dur:60'], ['1.5h', 'gw:dur:90'], ['✏️ Other', 'gw:dur:other']]]
+      : ['⏱ How long?', [['2h', 'gw:dur:120'], ['3h', 'gw:dur:180'], ['4h', 'gw:dur:240'], ['5h', 'gw:dur:300'], ['✏️ Other', 'gw:dur:other']]],
+  };
+  const [q, btns] = Q[need];
+  return bot.sendMessage(chatId, q, { reply_markup: { inline_keyboard: [_golfRow(btns), _GOLF_CANCEL] } });
+}
+
+// callback data: gw:<field>:<value>  (field = type|variant|intensity|holes|balls|dur|cancel)
+async function golfWizardButton(bot, chatId, rest) {
+  const [field, value] = rest.split(':');
+  const st = pendingStates.get(chatId);
+  if (!st || st.type !== 'golf_setup') return;
+  if (field === 'cancel') { pendingStates.delete(chatId); return bot.sendMessage(chatId, 'cancelled.'); }
+  if (value === 'other') { // ask the user to type the exact number/time
+    setPendingState(chatId, { ...st, awaitingOther: field });
+    return bot.sendMessage(chatId, field === 'dur' ? 'how long? (e.g. "3h" or "210 min")' : `how many ${field}?`);
+  }
+  const key = { type: 'gtype', variant: 'variant', intensity: 'intensity', holes: 'holes', balls: 'balls', dur: 'duration_min' }[field];
+  st[key] = ['holes', 'balls', 'dur'].includes(field) ? +value : value;
+  setPendingState(chatId, st);
+  await golfAsk(bot, chatId, pendingStates.get(chatId));
+}
+
+// User typed a value after tapping ✏️ Other. Returns true if it consumed the message.
+async function golfHandleOther(bot, chatId, st, text) {
+  const t = (text || '').toLowerCase();
+  let val = null;
+  if (st.awaitingOther === 'dur') {
+    const h = (t.match(/(\d+(?:\.\d+)?)\s*(?:h\b|hr|hour)/) || [])[1];
+    const m = (t.match(/(\d+)\s*(?:min|minute)?/) || [])[1];
+    val = h ? Math.round(+h * 60) : m ? +m : null;
+  } else {
+    const n = (t.match(/(\d+)/) || [])[1];
+    val = n ? +n : null;
+  }
+  if (val == null || val <= 0) { await bot.sendMessage(chatId, "didn't catch a number — try again? (e.g. \"21\")"); return true; }
+  const key = { holes: 'holes', balls: 'balls', dur: 'duration_min' }[st.awaitingOther];
+  const next = { ...st, [key]: val };
+  delete next.awaitingOther;
+  setPendingState(chatId, next);
+  await golfAsk(bot, chatId, pendingStates.get(chatId));
+  return true;
+}
+
+async function golfFinish(bot, chatId, st) {
+  const wd = st.workoutData;
+  delete wd._golfWizard; delete wd._rawText; // internal routing flags — don't persist
+  const met = st.gtype === 'sim' ? _GOLF_MET.sim
+    : st.gtype === 'range' ? _GOLF_MET[st.intensity || 'moderate']
+    : _GOLF_MET[st.variant || 'walking'];
+  // Sim duration is derived from holes (shared bays make wall-clock dishonest); others use the asked duration.
+  const dur = st.gtype === 'sim' ? Math.round((st.holes || 18) * _SIM_MIN_PER_HOLE) : st.duration_min;
   const body = db.getLastBodyMeasurement(chatId), tg = db.getTargetsFromDb(chatId);
-  const weight = body?.weight_kg ?? tg?.weight_kg;
-  const dur = wd.duration_min || 0;
-  if (weight && dur) { wd.calories_burned = Math.round(met * weight * (dur / 60)); wd.calories_locked = true; }
-  wd.activity_type = activityType;
-  wd.workout_name = String(wd.workout_name || 'Golf').replace(/\s*\((Walking|Cart|Simulator|Light|Moderate|Hard|Driving Range)\)\s*$/i, '') + ' (' + label + ')';
-  pendingStates.set(chatId, { ...state, workoutData: wd });
+  const weight = body?.weight_kg ?? tg?.weight_kg ?? 70;
+  wd.duration_min = dur;
+  wd.calories_burned = Math.round(met * weight * (dur / 60));
+  wd.calories_locked = true;
+  const typeLabel = st.gtype === 'sim' ? 'Simulator' : st.gtype === 'range' ? 'Driving Range' : (st.variant === 'cart' ? 'Cart' : 'Walking');
+  const meta = (st.gtype === 'course' || st.gtype === 'sim') && st.holes ? `${st.holes} holes`
+    : st.gtype === 'range' && st.balls ? `${st.balls} balls` : '';
+  wd.workout_name = 'Golf — ' + typeLabel + (meta ? ` (${meta})` : '');
+  wd.activity_type = st.gtype === 'sim' ? 'golf simulator' : st.gtype === 'range' ? 'driving range' : 'golf ' + (st.variant || 'walking');
+  setPendingState(chatId, { type: 'workout_confirm', workoutData: wd, catchupRetro: st.catchupRetro });
   await bot.sendMessage(chatId, formatWorkoutPreview(wd), WORKOUT_PREVIEW_KB);
 }
 
@@ -736,6 +850,13 @@ function startBot() {
         await bot.sendMessage(chatId, 'cancelled.');
         return;
       } else {
+
+      if (state.type === 'golf_setup') {
+        if (state.awaitingOther) { await golfHandleOther(bot, chatId, state, msg.text); return; }
+        // any other text while mid-wizard: nudge them to use the buttons
+        await golfAsk(bot, chatId, state);
+        return;
+      }
 
       if (state.type === 'morning_quality') {
         const quality = parseQuality(msg.text || '');
@@ -1091,10 +1212,10 @@ function startBot() {
       try { await bot.answerCallbackQuery(q.id); } catch {}
       // remove the buttons from the tapped message so it can't be double-tapped
       try { await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id }); } catch {}
-      const [kind, action] = q.data.split(':');
+      const [kind, action, ...more] = q.data.split(':');
       if (kind === 'mc')                         await mealButtonAction(bot, chatId, action);
       else if (kind === 'wc')                    await workoutButtonAction(bot, chatId, action);
-      else if (kind === 'gt' || kind === 'gv' || kind === 'gi') await golfAction(bot, chatId, kind, action);
+      else if (kind === 'gw')                    await golfWizardButton(bot, chatId, [action, ...more].join(':'));
       else if (kind === 'lw' && action === 'finish') await liveFinishAction(bot, chatId);
     } catch (e) {
       console.error('callback_query error:', e.message, e.stack);
@@ -1405,4 +1526,4 @@ async function sendHelp(bot, chatId) {
   );
 }
 
-module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal, mealButtonAction, workoutButtonAction, liveFinishAction, golfAction };
+module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal, mealButtonAction, workoutButtonAction, liveFinishAction, golfStart, golfWizardButton, golfHandleOther, golfParse };

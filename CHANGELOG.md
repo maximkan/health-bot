@@ -4,13 +4,12 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
-### Golf logging — context-aware (#1 refined)
-- **Golf now asks only what's relevant and missing.** Type is detected from your message; you only get a button for the choice that actually changes calories:
-  - "played on simulator" / "18 holes on cart" → no question, applies the right MET, just confirm.
-  - "played 18 holes" / "on course" → 🚶 Walking / 🛺 Cart only (no Simulator).
-  - "driving range" / "hit a bucket" → 😌 Light / 💪 Moderate / 🔥 Hard intensity (range MET 2.5/3.0/3.5).
-  - just "played golf" → ⛳ Course / 🎯 Range / 🖥 Simulator first, then the sub-question.
-- **Never blocks on duration** — estimated from holes/balls/type (18 holes ≈ 4h, range ~45min, sim ~60min); correct it with ✏️ Edit if wrong. — `handlers/workout.js`, `bot.js`, `utils/keyboards.js`, `db.js`
+### Golf logging — button wizard (#1, final)
+- **Golf now gathers the real numbers with quick buttons** instead of guessing. Estimating was too rough (a round is 3–5h; "did simulator" tells us nothing), so the wizard asks — but only for what you didn't already say, one tap each:
+  - **On course** → 🚶 Walking / 🛺 Cart → holes (9 / 18 / ✏️) → duration (2–5h / ✏️). MET walking 4.3 / cart 3.5.
+  - **Driving range** → intensity 😌/💪/🔥 → balls (50/100/150/✏️) → duration (30m–1.5h / ✏️). MET 2.5/3.0/3.5.
+  - **Simulator** → holes only. No walking + shared bays make wall-clock dishonest (4 players won't divide their time), so duration is derived from holes (~4 min active play/hole). MET 2.5.
+- If you type it all inline ("18 holes on a cart in 3.5h") it skips straight to the preview; if you just say "played golf" it asks the type first. ✏️ Other lets you type an exact number/time. Calories = MET × your weight × duration (locked, so it won't be silently recomputed). Verified across 8 flows + real-parse routing. — `bot.js` (new golf wizard), `handlers/workout.js`, `utils/keyboards.js`
 
 ### Golf simulator option + duplicate-merge fix (#6)
 - **Golf buttons are now 🚶 Walking / 🛺 Cart / 🖥 Simulator** (you can't play holes at a range, so "Range" → "Simulator"). Simulator = indoor, stand-and-swing, no walking — MET 2.5 (lowest; researched estimate). Walking 4.3 / Cart 3.5 / Simulator 2.5. — `utils/keyboards.js`, `bot.js`, seed
