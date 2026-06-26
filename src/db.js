@@ -524,7 +524,7 @@ function migrateExerciseNames(apply = false) {
 }
 
 // Resolve a workout's activity to a fixed cardio/sport MET (null = use density-based strength logic).
-const _ACTIVITY_MET = { tennis:'Tennis', golf:'Golf (walking)', run:'Running', running:'Running', jog:'Jogging', cycle:'Cycling', cycling:'Cycling', bike:'Cycling', row:'Rowing Machine', rowing:'Rowing Machine', swim:'Swimming', swimming:'Swimming', hiit:'HIIT', circuit:'Circuit Training', walk:'Walking', walking:'Walking', hike:'Hiking', hiking:'Hiking', yoga:'Yoga', pilates:'Pilates', basketball:'Basketball', soccer:'Soccer', boxing:'Boxing', badminton:'Badminton', squash:'Squash', climb:'Climbing', climbing:'Climbing' };
+const _ACTIVITY_MET = { 'golf simulator':'Golf Simulator', 'golf cart':'Golf (cart)', 'golf walking':'Golf (walking)', 'driving range':'Driving Range', tennis:'Tennis', golf:'Golf (walking)', run:'Running', running:'Running', jog:'Jogging', cycle:'Cycling', cycling:'Cycling', bike:'Cycling', row:'Rowing Machine', rowing:'Rowing Machine', swim:'Swimming', swimming:'Swimming', hiit:'HIIT', circuit:'Circuit Training', walk:'Walking', walking:'Walking', hike:'Hiking', hiking:'Hiking', yoga:'Yoga', pilates:'Pilates', basketball:'Basketball', soccer:'Soccer', boxing:'Boxing', badminton:'Badminton', squash:'Squash', climb:'Climbing', climbing:'Climbing' };
 function catalogWorkoutMet(chatId, workoutName, activityType) {
   const direct = resolveCatalogExercise(chatId, workoutName);
   if (direct && direct.met != null) return { met: direct.met, name: direct.canonical_name };

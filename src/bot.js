@@ -17,7 +17,7 @@ const { handleCorrection }  = require('./handlers/correction');
 const { getCurrentWeekType, setWeekType } = require('./utils/weekTracker');
 const { nowContextTz, extractTimeMs, detectRetroDate, getOffsetMs, getDateStrTz, requireTimezone } = require('./utils/time');
 const { calculateTDEE, ageFromBirthday } = require('./utils/tdee');
-const { MEAL_PREVIEW_KB, WORKOUT_PREVIEW_KB, LIVE_WORKOUT_KB, GOLF_PREVIEW_KB } = require('./utils/keyboards');
+const { MEAL_PREVIEW_KB, WORKOUT_PREVIEW_KB, LIVE_WORKOUT_KB, GOLF_TYPE_KB, GOLF_COURSE_KB, GOLF_RANGE_KB } = require('./utils/keyboards');
 
 // DB-backed so in-flight conversation flows survive process restarts. Same .set/.get/.has/.delete
 // API as the old Map (better-sqlite3 is synchronous, so this is a drop-in). Code that MUTATES a
@@ -435,21 +435,31 @@ async function workoutButtonAction(bot, chatId, action) {
   if (state.catchupRetro) { await bot.sendMessage(chatId, 'anything else? (or done)'); setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro }); }
 }
 
-const _GOLF_MET = { walking: 4.3, cart: 3.5, simulator: 2.5 };
-async function golfVariantAction(bot, chatId, variant) {
+const _GOLF_MET = { walking: 4.3, cart: 3.5, simulator: 2.5, light: 2.5, moderate: 3.0, hard: 3.5 };
+// kind: gt (type) | gv (course variant) | gi (range intensity)
+async function golfAction(bot, chatId, kind, value) {
   const state = pendingStates.get(chatId);
   if (!state || state.type !== 'workout_confirm') return;
-  const met = _GOLF_MET[variant]; if (!met) return;
+  if (kind === 'gt') { // type picked → show the relevant sub-question, or apply simulator directly
+    if (value === 'course') return bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData), GOLF_COURSE_KB);
+    if (value === 'range')  return bot.sendMessage(chatId, formatWorkoutPreview(state.workoutData), GOLF_RANGE_KB);
+    if (value === 'sim')    return applyGolfMet(bot, chatId, state, 2.5, 'Simulator', 'golf simulator');
+    return;
+  }
+  if (kind === 'gv') return applyGolfMet(bot, chatId, state, _GOLF_MET[value], value === 'cart' ? 'Cart' : 'Walking', 'golf ' + value);
+  if (kind === 'gi') return applyGolfMet(bot, chatId, state, _GOLF_MET[value], value[0].toUpperCase() + value.slice(1), 'driving range');
+}
+async function applyGolfMet(bot, chatId, state, met, label, activityType) {
+  if (!met) return;
   const wd = state.workoutData;
   const body = db.getLastBodyMeasurement(chatId), tg = db.getTargetsFromDb(chatId);
   const weight = body?.weight_kg ?? tg?.weight_kg;
   const dur = wd.duration_min || 0;
   if (weight && dur) { wd.calories_burned = Math.round(met * weight * (dur / 60)); wd.calories_locked = true; }
-  const label = variant === 'walking' ? 'Walking' : variant === 'cart' ? 'Cart' : 'Simulator';
-  wd.activity_type = 'golf ' + variant;
-  wd.workout_name = String(wd.workout_name || 'Golf').replace(/\s*\((Walking|Cart|Simulator|Driving Range)\)\s*$/i, '') + ' (' + label + ')';
+  wd.activity_type = activityType;
+  wd.workout_name = String(wd.workout_name || 'Golf').replace(/\s*\((Walking|Cart|Simulator|Light|Moderate|Hard|Driving Range)\)\s*$/i, '') + ' (' + label + ')';
   pendingStates.set(chatId, { ...state, workoutData: wd });
-  await bot.sendMessage(chatId, formatWorkoutPreview(wd), GOLF_PREVIEW_KB);
+  await bot.sendMessage(chatId, formatWorkoutPreview(wd), WORKOUT_PREVIEW_KB);
 }
 
 async function liveFinishAction(bot, chatId) {
@@ -1084,7 +1094,7 @@ function startBot() {
       const [kind, action] = q.data.split(':');
       if (kind === 'mc')                         await mealButtonAction(bot, chatId, action);
       else if (kind === 'wc')                    await workoutButtonAction(bot, chatId, action);
-      else if (kind === 'gv')                    await golfVariantAction(bot, chatId, action);
+      else if (kind === 'gt' || kind === 'gv' || kind === 'gi') await golfAction(bot, chatId, kind, action);
       else if (kind === 'lw' && action === 'finish') await liveFinishAction(bot, chatId);
     } catch (e) {
       console.error('callback_query error:', e.message, e.stack);
@@ -1395,4 +1405,4 @@ async function sendHelp(bot, chatId) {
   );
 }
 
-module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal, mealButtonAction, workoutButtonAction, liveFinishAction, golfVariantAction };
+module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal, mealButtonAction, workoutButtonAction, liveFinishAction, golfAction };

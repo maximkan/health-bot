@@ -4,6 +4,14 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
+### Golf logging — context-aware (#1 refined)
+- **Golf now asks only what's relevant and missing.** Type is detected from your message; you only get a button for the choice that actually changes calories:
+  - "played on simulator" / "18 holes on cart" → no question, applies the right MET, just confirm.
+  - "played 18 holes" / "on course" → 🚶 Walking / 🛺 Cart only (no Simulator).
+  - "driving range" / "hit a bucket" → 😌 Light / 💪 Moderate / 🔥 Hard intensity (range MET 2.5/3.0/3.5).
+  - just "played golf" → ⛳ Course / 🎯 Range / 🖥 Simulator first, then the sub-question.
+- **Never blocks on duration** — estimated from holes/balls/type (18 holes ≈ 4h, range ~45min, sim ~60min); correct it with ✏️ Edit if wrong. — `handlers/workout.js`, `bot.js`, `utils/keyboards.js`, `db.js`
+
 ### Golf simulator option + duplicate-merge fix (#6)
 - **Golf buttons are now 🚶 Walking / 🛺 Cart / 🖥 Simulator** (you can't play holes at a range, so "Range" → "Simulator"). Simulator = indoor, stand-and-swing, no walking — MET 2.5 (lowest; researched estimate). Walking 4.3 / Cart 3.5 / Simulator 2.5. — `utils/keyboards.js`, `bot.js`, seed
 - **#6 fix:** the exercise normalizer now keeps digits, so "Golf - 12 Holes" and "Golf - 18 Holes" (and "21s" etc.) no longer collapse into one entry. — `utils/exnorm.js`
