@@ -187,7 +187,15 @@ function computeWorkoutCalories(chatId, data) {
 
   const actType = (data.activity_type ?? '').toLowerCase();
 
-  // Cardio: fixed MET per type
+  // Catalog MET for cardio/sports (tennis, golf, hiking, yoga, …) — the source of truth. Resolves the
+  // workout to its activity and uses the Compendium MET, instead of letting sports fall through to the
+  // strength default (which wrongly computed every sport at MET ~3.5).
+  try {
+    const m = db.catalogWorkoutMet(chatId, data.workout_name, data.activity_type);
+    if (m && m.met != null) return Math.round(m.met * weight * (dur / 60));
+  } catch {}
+
+  // Cardio: fixed MET per type (fallback if not in catalog)
   if (actType.includes('run') || actType.includes('jog'))    return Math.round(8.5 * weight * (dur / 60));
   if (actType.includes('cycl') || actType.includes('bike'))  return Math.round(6.8 * weight * (dur / 60));
   if (actType.includes('row'))                                return Math.round(7.5 * weight * (dur / 60));
@@ -262,6 +270,19 @@ function formatWorkoutPreview(data) {
   return lines.join('\n');
 }
 
+// Map each logged exercise to its canonical catalog name (so "jumping squats"/"Jump Squats" → one
+// identity), and tag unilateral exercises. Unknown exercises are left as-is.
+function canonicalizeWorkoutExercises(chatId, data) {
+  if (!Array.isArray(data?.exercises)) return data;
+  for (const e of data.exercises) {
+    if (!e?.name) continue;
+    const c = db.canonicalizeExercise(chatId, e.name);
+    e.name = c.name;
+    if (c.unilateral) e.unilateral = true;
+  }
+  return data;
+}
+
 async function showWorkoutPreview(bot, msg) {
   const chatId = msg.chat.id;
   await bot.sendChatAction(chatId, 'typing');
@@ -280,6 +301,7 @@ async function showWorkoutPreview(bot, msg) {
     if (!userWeight) throw new Error('weight_kg missing — cannot parse workout. Log a body weight or complete onboarding.');
     const data = await claude.parseWorkout(msg.text || msg.caption || '', knownCtx, userWeight);
     if (msg._retroDate?.dateStr) data.date = msg._retroDate.dateStr;
+    canonicalizeWorkoutExercises(chatId, data);
     data.calories_burned = computeWorkoutCalories(chatId, data);
     await bot.sendMessage(chatId, formatWorkoutPreview(data), WORKOUT_PREVIEW_KB);
     return data;

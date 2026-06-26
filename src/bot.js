@@ -827,6 +827,9 @@ function startBot() {
           await bot.sendChatAction(chatId, 'typing');
           const parsed = await claude.parseLiveExercise(text);
           if (parsed?.name) {
+            const c = db.canonicalizeExercise(chatId, parsed.name); // standardize name + tag unilateral
+            parsed.name = c.name;
+            if (c.unilateral) parsed.unilateral = true;
             state.exercises.push(parsed);
             state._createdAt = Date.now();
             pendingStates.set(chatId, state);

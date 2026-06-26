@@ -252,7 +252,7 @@ If duration is not stated, ESTIMATE from exercises:
 SETS/REPS RULES:
 - Uniform: "3x10" → {sets: 3, reps: 10}
 - Single big set: "60 deadlifts" → {sets: 1, reps: 60}
-- "30 each leg" → reps=30 (the stated per-side number)
+- UNILATERAL (lunges, split squats, step-ups, single-arm/leg moves): reps = TOTAL across BOTH sides. "10 each side" → reps=20. "30 each leg" → reps=60. Always total — never store the per-side number.
 - Timed/distance: omit reps — use duration_sec or distance_m instead
 
 VARYING REPS OR WEIGHTS WITHIN ONE EXERCISE — use "sets_detail":
@@ -410,7 +410,8 @@ CARDIO / DISTANCE / TIMED exercises (running, rowing, cycling, swimming, ski erg
 - Timed: return {"name": "Plank", "duration_sec": <seconds>, "sets": <n if repeated, else omit>}.
   "plank 60s" → {"name": "Plank", "duration_sec": 60}
 
-weight_kg: null if bodyweight. reps: total reps if no sets specified.`;
+weight_kg: null if bodyweight. reps: total reps if no sets specified.
+UNILATERAL (lunges, split squats, step-ups, single-arm/leg): reps = TOTAL across both sides. "10 each side" → reps 20, never the per-side number.`;
 
 async function parseLiveExercise(text) {
   const resp = await anthropic.messages.create({

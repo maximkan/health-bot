@@ -4,6 +4,13 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
+### Exercise library — integration (the 5 fixes)
+- **Sports calories fixed.** `computeWorkoutCalories` now looks up the catalog MET for cardio/sports — tennis 60min/100kg went from 351 kcal (wrong MET 3.5) to **732 kcal (MET 7.3)**; golf-18-holes → 4.3, hiking → 6.0, yoga → 2.5. Strength stays density-based. Per-user weight handling was already correct (uses latest weigh-in). — `handlers/workout.js`, `db.js`
+- **Exercise names standardized on log.** Each logged exercise resolves to a canonical catalog name via a shared normalizer (case + plural + safe stemming — "Jumping Squats" = "jump squats", "running" = "run"). Kills new duplicates. — `db.js`, `utils/exnorm.js`, `handlers/workout.js`, `bot.js`
+- **Unilateral reps consistent.** Catalog flags 89+ exercises unilateral; parse prompts now always output TOTAL reps ("10 each side" → 20) — fixes the false-progression bug from reps flipping 10↔20. — `claude.js`
+- **History migrated.** One-time normalization deduped existing `known_exercises` (82 → 77 for the main user — Russian Twist/Twists, Hexagon case-dups, Run/Running merged; genuinely-different exercises kept separate) and rewrote workout-history names. Backup taken first. — `db.js`, `scripts/migrate-exercises.js`
+- **Custom exercises captured.** An unrecognized exercise is auto-saved as a per-user catalog entry (with a unilateral guess), so it gets one canonical identity and stops duplicating. (Richer "describe it / answer questions" enrichment is a follow-up.) — `db.js`
+
 ### Exercise library — foundation (catalog seed)
 - **New `exercise_catalog` table, seeded with 907 entries.** 868 strength/mobility exercises from the open free-exercise-db (canonical name, muscles, equipment, mechanic) + a curated 39-entry cardio/sport MET table from the Compendium of Physical Activities (Tennis 7.3, Golf-walking 4.3, Hiking 6.0, Yoga 2.5, …). 89 exercises auto-flagged unilateral (lunges/split squats/step-ups/one-arm) to fix per-side rep counting. — `scripts/seed-exercise-catalog.js`
 - Not wired into the bot yet (no behavior change). Next: resolve-on-log (alias matching), catalog-MET calorie lookup (fixes tennis/golf being computed at the wrong ~3.5 MET), unilateral rep handling, history normalization migration, and custom-exercise creation.

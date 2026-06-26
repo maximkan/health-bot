@@ -99,6 +99,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS pending_states (
   payload TEXT,
   updated_at INTEGER
 )`);
+
+// Exercise catalog: canonical names + METs (cardio/sport) + unilateral flags. Global rows (chat_id NULL)
+// are seeded from scripts/seed-exercise-catalog.js; per-user rows are custom exercises. See resolver below.
+db.exec(`CREATE TABLE IF NOT EXISTS exercise_catalog (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id INTEGER, canonical_name TEXT NOT NULL, norm_name TEXT, aliases TEXT DEFAULT '[]',
+  category TEXT, equipment TEXT, primary_muscles TEXT DEFAULT '[]', secondary_muscles TEXT DEFAULT '[]',
+  mechanic TEXT, met REAL, unilateral INTEGER DEFAULT 0, is_custom INTEGER DEFAULT 0, description TEXT, source TEXT
+)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_catalog_norm ON exercise_catalog(norm_name)`);
 addCol('sleep_log', 'type', 'TEXT DEFAULT "Night"');
 addCol('recovery_log', 'protocol', 'TEXT DEFAULT "single"');
 addCol('recovery_log', 'protocol_id', 'TEXT');
@@ -451,6 +461,88 @@ function upsertKnownExercise(chatId, { name, sets, reps, weight_kg, notes }) {
 }
 
 const getKnownExercises = (chatId) => db.prepare('SELECT * FROM known_exercises WHERE chat_id=? ORDER BY last_logged DESC LIMIT 40').all(chatId);
+
+// ── Exercise catalog resolver ─────────────────────────────────────────────────
+const { normEx: _normEx } = require('./utils/exnorm'); // shared with the catalog seed so keys match
+
+// Resolve an exercise name to a catalog entry (user's custom first, then global). null = unknown.
+function resolveCatalogExercise(chatId, name) {
+  const nn = _normEx(name);
+  if (!nn) return null;
+  let row = db.prepare('SELECT * FROM exercise_catalog WHERE norm_name=? AND (chat_id=? OR chat_id IS NULL) ORDER BY (chat_id IS NULL) ASC LIMIT 1').get(nn, chatId);
+  if (row) return row;
+  const lc = String(name).toLowerCase().trim();
+  return db.prepare('SELECT * FROM exercise_catalog WHERE (chat_id=? OR chat_id IS NULL) AND aliases LIKE ? LIMIT 1').get(chatId, '%"' + lc + '"%') || null;
+}
+
+// Canonical name for a logged exercise (maps "jumping squats"/"Jump Squats" → one catalog name).
+// An unknown exercise is auto-captured as a per-user custom catalog entry so future logs of it (any
+// casing/plural) dedupe to one identity — fixing the split-history bug for custom exercises too.
+const _UNILATERAL_RE = /lunge|split squat|bulgarian|single|one[- ]?arm|one[- ]?leg|each (side|leg|arm)|step[- ]?up|pistol|unilateral/i;
+function canonicalizeExercise(chatId, name) {
+  let row = resolveCatalogExercise(chatId, name);
+  if (!row) {
+    const nn = _normEx(name);
+    if (nn && /[a-z]/.test(nn)) {
+      try {
+        db.prepare('INSERT INTO exercise_catalog (chat_id,canonical_name,norm_name,category,unilateral,is_custom,source) VALUES (?,?,?,?,?,1,?)')
+          .run(chatId, String(name).trim(), nn, 'strength', _UNILATERAL_RE.test(name) ? 1 : 0, 'auto');
+        row = resolveCatalogExercise(chatId, name);
+      } catch {}
+    }
+  }
+  return { name: row ? row.canonical_name : name, unilateral: row ? !!row.unilateral : null, catalog: row };
+}
+
+// One-time migration: canonicalize existing known_exercises (dedupe case/plural/stem variants, keep most
+// recent) + rewrite workout_log history names. apply=false → dry-run (counts only). Uses this connection.
+function migrateExerciseNames(apply = false) {
+  let keRenames = 0, keMerges = 0, wlUpdates = 0; const examples = [];
+  const tx = db.transaction(() => {
+    for (const { chat_id } of db.prepare('SELECT DISTINCT chat_id FROM known_exercises').all()) {
+      const rows = db.prepare('SELECT * FROM known_exercises WHERE chat_id=? ORDER BY last_logged DESC').all(chat_id);
+      const byCanon = {};
+      for (const r of rows) { const canon = canonicalizeExercise(chat_id, r.name).name; (byCanon[canon] = byCanon[canon] || []).push({ ...r, canon }); }
+      for (const [canon, arr] of Object.entries(byCanon)) {
+        if (arr.length > 1) { keMerges += arr.length - 1; if (examples.length < 14) examples.push(arr.map(a => a.name).join(' + ') + ' → ' + canon); }
+        else if (arr[0].name !== canon) { keRenames++; if (examples.length < 14) examples.push('"' + arr[0].name + '" → "' + canon + '"'); }
+        if (apply) {
+          for (const dup of arr.slice(1)) db.prepare('DELETE FROM known_exercises WHERE id=?').run(dup.id);
+          if (arr[0].name !== canon) db.prepare('UPDATE known_exercises SET name=? WHERE id=?').run(canon, arr[0].id);
+        }
+      }
+    }
+    for (const w of db.prepare('SELECT id, chat_id, exercises_json FROM workout_log').all()) {
+      let exs; try { exs = JSON.parse(w.exercises_json || '[]'); } catch { continue; }
+      let changed = false;
+      for (const e of exs) { if (e?.name) { const canon = canonicalizeExercise(w.chat_id, e.name).name; if (canon !== e.name) { e.name = canon; changed = true; } } }
+      if (changed) { wlUpdates++; if (apply) db.prepare('UPDATE workout_log SET exercises_json=? WHERE id=?').run(JSON.stringify(exs), w.id); }
+    }
+  });
+  tx();
+  return { keRenames, keMerges, wlUpdates, examples };
+}
+
+// Resolve a workout's activity to a fixed cardio/sport MET (null = use density-based strength logic).
+const _ACTIVITY_MET = { tennis:'Tennis', golf:'Golf (walking)', run:'Running', running:'Running', jog:'Jogging', cycle:'Cycling', cycling:'Cycling', bike:'Cycling', row:'Rowing Machine', rowing:'Rowing Machine', swim:'Swimming', swimming:'Swimming', hiit:'HIIT', circuit:'Circuit Training', walk:'Walking', walking:'Walking', hike:'Hiking', hiking:'Hiking', yoga:'Yoga', pilates:'Pilates', basketball:'Basketball', soccer:'Soccer', boxing:'Boxing', badminton:'Badminton', squash:'Squash', climb:'Climbing', climbing:'Climbing' };
+function catalogWorkoutMet(chatId, workoutName, activityType) {
+  const direct = resolveCatalogExercise(chatId, workoutName);
+  if (direct && direct.met != null) return { met: direct.met, name: direct.canonical_name };
+  const nameWords = new Set(_normEx(workoutName).split(' ').filter(Boolean));
+  if (nameWords.size) {
+    let best = null, bestLen = 0;
+    for (const c of db.prepare('SELECT canonical_name, norm_name, met FROM exercise_catalog WHERE met IS NOT NULL AND chat_id IS NULL').all()) {
+      const cw = c.norm_name.split(' ').filter(Boolean);
+      if (cw.length && cw.length > bestLen && cw.every(w => nameWords.has(w))) { best = c; bestLen = cw.length; }
+    }
+    if (best) return { met: best.met, name: best.canonical_name };
+  }
+  const at = String(activityType || '').toLowerCase();
+  for (const [k, v] of Object.entries(_ACTIVITY_MET)) {
+    if (at.includes(k)) { const r = db.prepare('SELECT canonical_name, met FROM exercise_catalog WHERE canonical_name=? AND met IS NOT NULL').get(v); if (r) return { met: r.met, name: r.canonical_name }; }
+  }
+  return null;
+}
 
 // ── SQLite meal log ───────────────────────────────────────────────────────────
 
@@ -973,7 +1065,7 @@ module.exports = {
   saveHistory, getHistory,
   setPendingStateDb, getPendingStateDb, hasPendingStateDb, deletePendingStateDb,
 upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKnownFoods,
-  upsertKnownExercise, getKnownExercises,
+  upsertKnownExercise, getKnownExercises, resolveCatalogExercise, catalogWorkoutMet, canonicalizeExercise, migrateExerciseNames,
   getTargetsFromDb, setTargetsInDb,
   saveMealLog, getDayDataFromSQLite, getDailyMealTotalsFromSQLite,
   saveWorkoutLog, getRecentWorkouts, saveRecoveryLog, saveSleepLog, getLastSleepLog, setSleepQuality,

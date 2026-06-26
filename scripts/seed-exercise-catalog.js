@@ -23,8 +23,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS exercise_catalog (
   source TEXT
 )`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_catalog_norm ON exercise_catalog(norm_name)`);
+db.prepare('DELETE FROM exercise_catalog WHERE chat_id IS NULL').run(); // clean re-seed (shared norm may have changed)
 
-const norm = s => s.toLowerCase().replace(/[^a-z\s]/g,' ').split(/\s+/).filter(Boolean).map(w=>w.replace(/s$/,'')).sort().join(' ');
+const { normEx: norm } = require('../src/utils/exnorm'); // shared with the runtime resolver so keys match
 const UNILATERAL = /lunge|split squat|bulgarian|single|one[- ]?arm|one[- ]?leg|each (side|leg|arm)|step[- ]?up|pistol|unilateral/i;
 
 // ---- curated MET table: cardio + sports (Compendium of Physical Activities) ----
