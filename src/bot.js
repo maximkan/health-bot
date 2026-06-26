@@ -4,7 +4,7 @@ const db      = require('./db');
 const cronSvc = require('./cron');
 const claude  = require('./claude');
 const day     = require('./handlers/day');
-const { showMealPreview, logMeal, applyCorrection, formatPreview } = require('./handlers/meal');
+const { showMealPreview, logMeal, applyCorrection, formatPreview, buildMealKeyboard, applyPlaceVariant } = require('./handlers/meal');
 const { showWorkoutPreview, logWorkout, formatWorkoutPreview, computeWorkoutCalories, formatExerciseLine } = require('./handlers/workout');
 const { handleRecovery }    = require('./handlers/recovery');
 const { closeChain }        = require('./handlers/ask');
@@ -418,6 +418,26 @@ async function mealButtonAction(bot, chatId, action) {
     await logMeal(bot, chatId, mealData, state.dayStart);
     if (state.catchupRetro) { await bot.sendMessage(chatId, 'anything else? (or done)'); setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro }); }
   }
+}
+
+// #3 — place picker on a meal preview. rest = "pick:<idx>" | "home" | "new"
+async function mealPlaceButton(bot, chatId, rest) {
+  const [sub, idx] = rest.split(':');
+  const state = pendingStates.get(chatId);
+  if (!state || state.type !== 'meal_confirm') return;
+  const data = state.mealData;
+  if (sub === 'pick') {
+    const v = (data._placeVariants || [])[+idx];
+    if (v) applyPlaceVariant(data, v);
+  } else if (sub === 'home') {
+    data.place = 'Home';
+  } else if (sub === 'new') {
+    setPendingState(chatId, { ...state, awaitingPlace: true });
+    await bot.sendMessage(chatId, 'which place? type the name (e.g. "Tony\'s")');
+    return;
+  }
+  setPendingState(chatId, { ...state, mealData: data });
+  await bot.sendMessage(chatId, formatPreview(data), buildMealKeyboard(chatId, data));
 }
 
 async function workoutButtonAction(bot, chatId, action) {
@@ -1088,6 +1108,16 @@ function startBot() {
         const text = msg.text || '';
         const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
 
+        // #3 — user is typing a venue name after tapping 🆕 New place
+        if (state.awaitingPlace) {
+          const place = text.trim().replace(/^(from|at|@)\s+/i, '').replace(/[.!]+$/, '').trim().slice(0, 40);
+          if (!place) { await bot.sendMessage(chatId, 'type the place name (or tap ❌ Cancel)'); return; }
+          state.mealData.place = place;
+          setPendingState(chatId, { ...state, awaitingPlace: false });
+          await bot.sendMessage(chatId, formatPreview(state.mealData), buildMealKeyboard(chatId, state.mealData));
+          return;
+        }
+
         const isExplicitCancel = await claude.isDeclineIntent(text);
         if (isExplicitCancel) {
           pendingStates.delete(chatId);
@@ -1214,6 +1244,7 @@ function startBot() {
       try { await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: q.message.message_id }); } catch {}
       const [kind, action, ...more] = q.data.split(':');
       if (kind === 'mc')                         await mealButtonAction(bot, chatId, action);
+      else if (kind === 'pl')                    await mealPlaceButton(bot, chatId, [action, ...more].join(':'));
       else if (kind === 'wc')                    await workoutButtonAction(bot, chatId, action);
       else if (kind === 'gw')                    await golfWizardButton(bot, chatId, [action, ...more].join(':'));
       else if (kind === 'lw' && action === 'finish') await liveFinishAction(bot, chatId);
@@ -1526,4 +1557,4 @@ async function sendHelp(bot, chatId) {
   );
 }
 
-module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal, mealButtonAction, workoutButtonAction, liveFinishAction, golfStart, golfWizardButton, golfHandleOther, golfParse };
+module.exports = { startBot, dispatchIntents, routeMessage, checkAdaptiveTargetProposal, mealButtonAction, mealPlaceButton, workoutButtonAction, liveFinishAction, golfStart, golfWizardButton, golfHandleOther, golfParse };

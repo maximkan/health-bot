@@ -4,6 +4,14 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
+### Restaurant meals — per-dish place-variants (#3)
+- **Dishes can now remember where you ate them, with the right macros per venue.** When you log a specific prepared dish (pizza, burger, ramen, pad thai…), the preview offers a place picker; generic foods (a banana, boiled eggs, coffee, a protein shake) are never asked.
+  - Name the venue inline — "pepperoni pizza **from Tony's**" — and it's captured + saved automatically.
+  - Next time you log that dish, its saved venues appear as one-tap buttons: `📍 Tony's  📍 Luigi's  //  🏠 Home  🆕 New place`. Tapping a venue swaps in **that venue's** macros; 🏠 Home logs the plain dish; 🆕 New place asks for a name.
+  - Each venue keeps its own calorie/macro count, so "Pizza @ Tony's" (800) and "Pizza @ Luigi's" (650) stay distinct.
+- The instant-repeat-logger no longer silently matches a plain dish name to one saved venue — a bare mention always offers the picker so you choose. Every logged meal is now tagged with its place. — `db.js` (place/base_name on known_foods, place on meal_log, getPlaceVariants/savePlaceVariant), `claude.js` (place + place_worthy fields), `handlers/meal.js`, `bot.js`
+
+
 ### Golf logging — button wizard (#1, final)
 - **Golf now gathers the real numbers with quick buttons** instead of guessing. Estimating was too rough (a round is 3–5h; "did simulator" tells us nothing), so the wizard asks — but only for what you didn't already say, one tap each:
   - **On course** → 🚶 Walking / 🛺 Cart → holes (9 / 18 / ✏️) → duration (2–5h / ✏️). MET walking 4.3 / cart 3.5.

@@ -224,6 +224,12 @@ if (!hasKnownFoodsChatId) {
   )`);
 }
 
+// #3 restaurant places: per-dish place-variants (each venue can have its own macros). `base_name`
+// groups variants of one dish ("Pepperoni Pizza" → "… @ Tony's"). (meal_log.place added below, after
+// that table is created.)
+addCol('known_foods', 'place', 'TEXT');
+addCol('known_foods', 'base_name', 'TEXT');
+
 // ── Mark existing users as onboarded ─────────────────────────────────────────
 
 db.exec(`UPDATE user_state SET onboarded=1
@@ -299,6 +305,7 @@ db.exec(`
     logged_at INTEGER NOT NULL
   );
 `);
+addCol('meal_log', 'place', 'TEXT'); // #3 — where the meal was eaten
 
 db.exec(`CREATE TABLE IF NOT EXISTS coach_conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,11 +418,29 @@ function deleteUnfiredReminders(chatId) {
 
 // ── Known foods — per user ────────────────────────────────────────────────────
 
-function upsertKnownFood(chatId, { name, serving = '1 serving', calories = 0, protein = 0, carbs = 0, fat = 0, day_of_week = null, notes = '', source = 'User Logged' }) {
-  db.prepare(`INSERT INTO known_foods (chat_id,name,serving,calories,protein,carbs,fat,day_of_week,notes,source)
-    VALUES (?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(chat_id,name) DO UPDATE SET serving=excluded.serving,calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,day_of_week=excluded.day_of_week,notes=excluded.notes,source=excluded.source`)
-    .run(chatId, name, serving, Math.round(calories), protein, carbs, fat, day_of_week || null, notes || '', source);
+function upsertKnownFood(chatId, { name, serving = '1 serving', calories = 0, protein = 0, carbs = 0, fat = 0, day_of_week = null, notes = '', source = 'User Logged', place = null, base_name = null }) {
+  db.prepare(`INSERT INTO known_foods (chat_id,name,serving,calories,protein,carbs,fat,day_of_week,notes,source,place,base_name)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(chat_id,name) DO UPDATE SET serving=excluded.serving,calories=excluded.calories,protein=excluded.protein,carbs=excluded.carbs,fat=excluded.fat,day_of_week=excluded.day_of_week,notes=excluded.notes,source=excluded.source,place=excluded.place,base_name=excluded.base_name`)
+    .run(chatId, name, serving, Math.round(calories), protein, carbs, fat, day_of_week || null, notes || '', source, place || null, base_name || null);
+}
+
+// #3 — place-variants of a dish. base_name groups them; place is the venue. "Home" variants are not
+// stored (home = the plain dish). getPlaceVariants returns the distinct saved venues for a dish.
+function getPlaceVariants(chatId, baseName) {
+  const b = String(baseName || '').trim().toLowerCase();
+  if (!b) return [];
+  return db.prepare(`SELECT name, place, serving, calories, protein, carbs, fat FROM known_foods
+    WHERE chat_id=? AND place IS NOT NULL AND place!='' AND lower(COALESCE(base_name,name))=? ORDER BY id`).all(chatId, b);
+}
+function savePlaceVariant(chatId, baseName, place, t) {
+  if (!baseName || !place || /^home$/i.test(place.trim())) return;
+  const p = place.trim();
+  upsertKnownFood(chatId, {
+    name: `${baseName} @ ${p}`, base_name: baseName, place: p, serving: '1 serving',
+    calories: t.calories ?? 0, protein: t.protein ?? 0, carbs: t.carbs ?? 0, fat: t.fat ?? 0,
+    notes: 'Place variant', source: 'User Logged',
+  });
 }
 
 function knownFoodExists(chatId, name) { return !!db.prepare('SELECT id FROM known_foods WHERE chat_id=? AND name=? LIMIT 1').get(chatId, name); }
@@ -547,12 +572,12 @@ function catalogWorkoutMet(chatId, workoutName, activityType) {
 // ── SQLite meal log ───────────────────────────────────────────────────────────
 
 function saveMealLog(chatId, data, dayStart) {
-  const id = db.prepare(`INSERT INTO meal_log (chat_id,meal_name,meal_type,calories,protein,carbs,fat,caffeine_mg,items_json,logged_at,day_start,retro_date,meal_time)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  const id = db.prepare(`INSERT INTO meal_log (chat_id,meal_name,meal_type,calories,protein,carbs,fat,caffeine_mg,items_json,logged_at,day_start,retro_date,meal_time,place)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(chatId, data.meal_name, data.meal_type ?? 'Meal',
       data.totals?.calories ?? 0, data.totals?.protein ?? 0, data.totals?.carbs ?? 0, data.totals?.fat ?? 0,
       data.caffeine_mg ?? 0, JSON.stringify(data.items ?? []), Date.now(), dayStart ?? null, data.date ?? null,
-      data.time ?? null
+      data.time ?? null, data.place ?? null
     ).lastInsertRowid;
   return id;
 }
@@ -1065,6 +1090,7 @@ module.exports = {
   saveHistory, getHistory,
   setPendingStateDb, getPendingStateDb, hasPendingStateDb, deletePendingStateDb,
 upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKnownFoods,
+  getPlaceVariants, savePlaceVariant,
   upsertKnownExercise, getKnownExercises, resolveCatalogExercise, catalogWorkoutMet, canonicalizeExercise, migrateExerciseNames,
   getTargetsFromDb, setTargetsInDb,
   saveMealLog, getDayDataFromSQLite, getDailyMealTotalsFromSQLite,

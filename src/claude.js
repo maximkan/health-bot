@@ -172,8 +172,14 @@ Respond ONLY with this JSON:
   "caffeine_mg": 0,
   "confidence": "high",
   "clarification": null,
-  "new_food": false
+  "new_food": false,
+  "place": null,
+  "place_worthy": false
 }
+
+PLACE RULES (restaurant/venue tracking):
+- "place": the venue/restaurant the food is from, IF the user names one ("pizza from Tony's", "burger at Five Guys", "Starbucks latte", "McDonald's") → the venue name (e.g. "Tony's", "Five Guys", "Starbucks"). If they say it's homemade/"I made"/"at home" → "Home". Otherwise null. Do NOT invent a place.
+- "place_worthy": true if this is ONE specific prepared/composed dish whose macros plausibly differ by venue (pizza, burger, ramen, pad thai, biryani, sushi roll, burrito, sandwich, pasta dish, fried chicken). false for generic single ingredients or staples where venue is irrelevant (a banana, boiled eggs, plain rice, oatmeal, a protein shake, black coffee, water, plain yogurt) and for multi-item institution/menu plates.
 
 meal_type (time-based unless it's a drink):
 - Any beverage → "Drink"

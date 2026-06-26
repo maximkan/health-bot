@@ -25,6 +25,7 @@ function matchKnownMeal(caption, foods) {
   // candidates: foods whose distinctive words contain all the message words (exact, or a ≥2-word subset)
   const cand = [];
   for (const f of foods) {
+    if (f.place) continue; // #3 — venue-specific variant: a plain mention must offer the place picker, not silently pick one venue
     if (_CAFFEINE_RE.test((f.name || '').toLowerCase())) continue; // caffeine isn't stored → let the AI handle it
     const fw = new Set(_words(f.name));
     if (!fw.size || !msg.every(w => fw.has(w))) continue;
@@ -47,7 +48,8 @@ const { getCurrentWeekType } = require('../utils/weekTracker');
 
 function formatPreview(data) {
   const header = data._hasPhoto ? '📷 looks like:' : '🍽 my estimate:';
-  const lines = [`${header} ${data.meal_name}\n`];
+  const placeTag = data.place ? `  📍 ${data.place}` : '';
+  const lines = [`${header} ${data.meal_name}${placeTag}\n`];
 
   for (const item of (data.items || [])) {
     const g = item.weight_g ? ` (${item.weight_g}g)` : '';
@@ -60,6 +62,26 @@ function formatPreview(data) {
   lines.push('');
   lines.push('ok to log, or tell me what to fix');
   return lines.join('\n');
+}
+
+const _MEAL_ACTION_ROW = [
+  { text: '✅ Log', callback_data: 'mc:log' }, { text: '✏️ Edit', callback_data: 'mc:edit' }, { text: '❌ Cancel', callback_data: 'mc:cancel' },
+];
+// #3 — for a place-worthy dish (or one that already has saved venues), offer a place picker above the
+// Log row. Saved venues swap in their own macros; 🏠 Home logs the plain dish; 🆕 New place asks a name.
+// Generic foods get the normal Log/Edit/Cancel keyboard, untouched.
+function buildMealKeyboard(chatId, data) {
+  let variants = [];
+  try { variants = db.getPlaceVariants(chatId, data.meal_name); } catch {}
+  data._placeVariants = variants.map(v => ({ place: v.place, name: v.name, calories: v.calories, protein: v.protein, carbs: v.carbs, fat: v.fat }));
+  const needPlaceUI = !!data.place || data.place_worthy === true || variants.length > 0;
+  if (!needPlaceUI) return { reply_markup: { inline_keyboard: [_MEAL_ACTION_ROW] } };
+  const rows = [];
+  const vb = data._placeVariants.slice(0, 4).map((v, i) => ({ text: `📍 ${v.place}`, callback_data: `pl:pick:${i}` }));
+  for (let i = 0; i < vb.length; i += 2) rows.push(vb.slice(i, i + 2));
+  rows.push([{ text: '🏠 Home', callback_data: 'pl:home' }, { text: '🆕 New place', callback_data: 'pl:new' }]);
+  rows.push(_MEAL_ACTION_ROW);
+  return { reply_markup: { inline_keyboard: rows } };
 }
 
 function progressBar(actual, target, width = 6) {
@@ -94,6 +116,14 @@ function formatConfirmation(data, totals, targets) {
   return lines.join('\n');
 }
 
+// Swap a meal's macros to a saved place-variant (used when the user picks a known venue).
+function applyPlaceVariant(data, v) {
+  const t = { calories: Math.round(v.calories), protein: Math.round(v.protein), carbs: Math.round(v.carbs), fat: Math.round(v.fat) };
+  data.totals = t;
+  data.items = [{ name: data.meal_name, ...t }];
+  data.place = v.place;
+}
+
 async function showMealPreview(bot, msg, photos) {
   const chatId    = msg.chat.id;
   const photoList = Array.isArray(photos) ? photos : (photos ? [photos] : []);
@@ -119,7 +149,7 @@ async function showMealPreview(bot, msg, photos) {
           const t = { calories: Math.round(m.calories), protein: Math.round(m.protein), carbs: Math.round(m.carbs), fat: Math.round(m.fat) };
           const name = cleanFoodName(m.name); // hide internal [Odd Week]/[Dinner Tue] day markers from the user
           const data = { meal_name: name, _hasPhoto: false, items: [{ name, ...t }], totals: t, caffeine_mg: 0, confidence: 'high', _fromKnownFood: true };
-          await bot.sendMessage(chatId, formatPreview(data), MEAL_PREVIEW_KB);
+          await bot.sendMessage(chatId, formatPreview(data), buildMealKeyboard(chatId, data));
           return data;
         }
       } catch (e) { console.error('Known-meal match error:', e.message); /* fall through to AI */ }
@@ -151,7 +181,14 @@ async function showMealPreview(bot, msg, photos) {
       return data;
     }
 
-    await bot.sendMessage(chatId, formatPreview(data), MEAL_PREVIEW_KB);
+    // #3 — if the AI named a venue we already have macros for, use that venue's macros.
+    if (data.place && !/^home$/i.test(data.place)) {
+      try {
+        const v = db.getPlaceVariants(chatId, data.meal_name).find(x => x.place?.toLowerCase() === data.place.toLowerCase());
+        if (v) applyPlaceVariant(data, v);
+      } catch {}
+    }
+    await bot.sendMessage(chatId, formatPreview(data), buildMealKeyboard(chatId, data));
     return data;
   } catch (err) {
     console.error('Meal preview error:', err.message, err.stack);
@@ -169,6 +206,8 @@ async function logMeal(bot, chatId, data, dayStart) {
     const caffeineMg = data.caffeine_mg ?? 0;
     if (caffeineMg > 0) db.addCaffeine(chatId, caffeineMg);
     if (!data.date) { try { db.addKnownFood(chatId, data); } catch {} }
+    // #3 — remember this dish's macros for the venue, so next time it's a one-tap button.
+    if (data.place && !/^home$/i.test(data.place)) { try { db.savePlaceVariant(chatId, data.meal_name, data.place, data.totals); } catch {} }
 
     let totals  = null;
     let targets = null;
@@ -194,4 +233,4 @@ async function applyCorrection(bot, chatId, existingData, correctionText) {
   }
 }
 
-module.exports = { showMealPreview, logMeal, applyCorrection, formatPreview, formatConfirmation, matchKnownMeal };
+module.exports = { showMealPreview, logMeal, applyCorrection, formatPreview, formatConfirmation, matchKnownMeal, buildMealKeyboard, applyPlaceVariant };
