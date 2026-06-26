@@ -4,6 +4,10 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
+### Golf simulator option + duplicate-merge fix (#6)
+- **Golf buttons are now 🚶 Walking / 🛺 Cart / 🖥 Simulator** (you can't play holes at a range, so "Range" → "Simulator"). Simulator = indoor, stand-and-swing, no walking — MET 2.5 (lowest; researched estimate). Walking 4.3 / Cart 3.5 / Simulator 2.5. — `utils/keyboards.js`, `bot.js`, seed
+- **#6 fix:** the exercise normalizer now keeps digits, so "Golf - 12 Holes" and "Golf - 18 Holes" (and "21s" etc.) no longer collapse into one entry. — `utils/exnorm.js`
+
 ### Workout mutation + golf variants (#1, #2)
 - **Workout corrections now stick (#2).** "make it 600 cal" / "way less, like half" → honored (manual override, no longer overwritten by the MET recompute); "count it as a 5km walk" / "golf with a cart" → re-classifies the activity and recomputes with the right MET. — `claude.js` (applyWorkoutCorrection), `bot.js`
 - **Golf is asked how it was played (#1).** A golf preview now shows 🚶 Walking / 🛺 Cart / 🎯 Range buttons (unless the variant is already clear) — tapping recomputes with the correct MET: Walking 4.3, Cart 3.5, Driving Range 3.0 (research/Compendium values; range corrected 3.5→3.0). Defaults to walking if you just log. — `bot.js`, `handlers/workout.js`, `utils/keyboards.js`, seed

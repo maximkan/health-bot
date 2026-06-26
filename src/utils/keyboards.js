@@ -17,7 +17,7 @@ module.exports = {
   ]]}},
   // Golf preview: pick how it was played (changes the MET), then log. Defaults to walking if they just log.
   GOLF_PREVIEW_KB: { reply_markup: { inline_keyboard: [
-    [{ text: '🚶 Walking', callback_data: 'gv:walking' }, { text: '🛺 Cart', callback_data: 'gv:cart' }, { text: '🎯 Range', callback_data: 'gv:range' }],
+    [{ text: '🚶 Walking', callback_data: 'gv:walking' }, { text: '🛺 Cart', callback_data: 'gv:cart' }, { text: '🖥 Simulator', callback_data: 'gv:simulator' }],
     [{ text: '✅ Log', callback_data: 'wc:log' }, { text: '✏️ Edit', callback_data: 'wc:edit' }, { text: '❌ Cancel', callback_data: 'wc:cancel' }],
   ]}},
 };

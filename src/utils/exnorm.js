@@ -7,6 +7,7 @@ function stemWord(w) {
   return w.replace(/s$/, '');
 }
 function normEx(s) {
-  return String(s || '').toLowerCase().replace(/[^a-z\s]/g, ' ').split(/\s+/).filter(Boolean).map(stemWord).sort().join(' ');
+  // keep digits so "12 Holes" ≠ "18 Holes" (and "21s" etc. stay distinct)
+  return String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).map(stemWord).sort().join(' ');
 }
 module.exports = { normEx, stemWord };

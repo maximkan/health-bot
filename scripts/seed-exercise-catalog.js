@@ -37,7 +37,7 @@ const MET = [
   ['Hiking', 6.0, 'cardio'], ['HIIT', 10.0, 'cardio'], ['Circuit Training', 8.0, 'cardio'],
   ['Tennis', 7.3, 'sport'], ['Tennis (doubles)', 6.0, 'sport'], ['Badminton', 5.5, 'sport'],
   ['Squash', 12.0, 'sport'], ['Table Tennis', 4.0, 'sport'], ['Golf (walking)', 4.3, 'sport'],
-  ['Golf (cart)', 3.5, 'sport'], ['Driving Range', 3.0, 'sport'], ['Basketball', 6.5, 'sport'],
+  ['Golf (cart)', 3.5, 'sport'], ['Driving Range', 3.0, 'sport'], ['Golf Simulator', 2.5, 'sport'], ['Basketball', 6.5, 'sport'],
   ['Soccer', 7.0, 'sport'], ['Volleyball', 4.0, 'sport'], ['Boxing', 7.8, 'sport'],
   ['Kickboxing', 7.5, 'sport'], ['Martial Arts', 7.8, 'sport'], ['Climbing', 8.0, 'sport'],
   ['Yoga', 2.5, 'sport'], ['Pilates', 3.0, 'sport'], ['Stretching', 2.3, 'stretching'],

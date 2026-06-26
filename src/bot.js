@@ -435,7 +435,7 @@ async function workoutButtonAction(bot, chatId, action) {
   if (state.catchupRetro) { await bot.sendMessage(chatId, 'anything else? (or done)'); setPendingState(chatId, { type: 'catchup_log', ...state.catchupRetro }); }
 }
 
-const _GOLF_MET = { walking: 4.3, cart: 3.5, range: 3.0 };
+const _GOLF_MET = { walking: 4.3, cart: 3.5, simulator: 2.5 };
 async function golfVariantAction(bot, chatId, variant) {
   const state = pendingStates.get(chatId);
   if (!state || state.type !== 'workout_confirm') return;
@@ -445,9 +445,9 @@ async function golfVariantAction(bot, chatId, variant) {
   const weight = body?.weight_kg ?? tg?.weight_kg;
   const dur = wd.duration_min || 0;
   if (weight && dur) { wd.calories_burned = Math.round(met * weight * (dur / 60)); wd.calories_locked = true; }
-  const label = variant === 'walking' ? 'Walking' : variant === 'cart' ? 'Cart' : 'Driving Range';
-  wd.activity_type = variant === 'range' ? 'driving range' : 'golf ' + variant;
-  wd.workout_name = String(wd.workout_name || 'Golf').replace(/\s*\((Walking|Cart|Driving Range)\)\s*$/i, '') + ' (' + label + ')';
+  const label = variant === 'walking' ? 'Walking' : variant === 'cart' ? 'Cart' : 'Simulator';
+  wd.activity_type = 'golf ' + variant;
+  wd.workout_name = String(wd.workout_name || 'Golf').replace(/\s*\((Walking|Cart|Simulator|Driving Range)\)\s*$/i, '') + ' (' + label + ')';
   pendingStates.set(chatId, { ...state, workoutData: wd });
   await bot.sendMessage(chatId, formatWorkoutPreview(wd), GOLF_PREVIEW_KB);
 }
