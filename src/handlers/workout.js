@@ -337,10 +337,40 @@ async function logWorkout(bot, chatId, data, dayStart) {
     }
     // Workout comparison (fire-and-forget)
     checkWorkoutProgression(bot, chatId, data).catch(() => {});
+    // #4 — enrich any newly auto-captured custom exercises (fire-and-forget)
+    enrichNewExercises(bot, chatId, data).catch(() => {});
   } catch (err) {
     console.error('Workout log error:', err.message, err.stack);
     await bot.sendMessage(chatId, `❌ ${err.message}`);
   }
+}
+
+// #4 — for each newly auto-captured custom exercise, derive its attributes (muscles/equipment/MET) via
+// the AI. Recognized ones are saved silently; ones the AI can't identify trigger a short question list
+// the user can reply to (handled by the 'exercise_enrich' pending state in bot.js). Skipped for retro
+// (catch-up) logs so a bulk backfill isn't interrupted.
+async function enrichNewExercises(bot, chatId, data) {
+  const names = (data.exercises || []).map(e => e.name).filter(Boolean);
+  let customs = [];
+  try { customs = db.getAutoCapturedCustoms(chatId, names); } catch {}
+  if (!customs.length) return;
+  const context = data.workout_name || '';
+  const unrecognized = [];
+  for (const n of customs) {
+    try {
+      const a = await claude.enrichExercise(n, context);
+      if (a && a.recognized) db.updateCatalogEnrichment(chatId, n, a, 'enriched');
+      else unrecognized.push({ name: n, questions: (a && a.questions) || [] });
+    } catch {}
+  }
+  if (!unrecognized.length || data.date) return; // don't interrupt retro/catch-up backfills with a question
+  const askNames = unrecognized.map(u => u.name);
+  const qs = ((unrecognized[0].questions && unrecognized[0].questions.length)
+    ? unrecognized[0].questions
+    : ['Which muscles does it mainly work?', 'What equipment — barbell, dumbbell, machine, or bodyweight?', 'One side at a time?']).slice(0, 3);
+  const list = askNames.map(n => `"${n}"`).join(', ');
+  try { db.setPendingStateDb(chatId, { type: 'exercise_enrich', names: askNames, _createdAt: Date.now() }); } catch {}
+  await bot.sendMessage(chatId, `🆕 logged ${list} — I don't know ${askNames.length > 1 ? 'them' : 'it'} well yet. Tell me and I'll remember:\n${qs.map(q => '• ' + q).join('\n')}\n\n(or just keep going — I'll use my best guess)`);
 }
 
 async function checkWorkoutProgression(bot, chatId, currentWorkout) {

@@ -46,14 +46,16 @@ function matchKnownMeal(caption, foods) {
 const { getDayOfWeekTz, nowContextTz, requireTimezone } = require('../utils/time');
 const { getCurrentWeekType } = require('../utils/weekTracker');
 
+const _placeLabel = (p) => (p && !/^home$/i.test(p)) ? `  📍 ${p}` : (/^home$/i.test(p || '') ? '  🏠 Home' : '');
 function formatPreview(data) {
   const header = data._hasPhoto ? '📷 looks like:' : '🍽 my estimate:';
-  const placeTag = data.place ? `  📍 ${data.place}` : '';
-  const lines = [`${header} ${data.meal_name}${placeTag}\n`];
+  const lines = [`${header} ${data.meal_name}\n`];
 
   for (const item of (data.items || [])) {
     const g = item.weight_g ? ` (${item.weight_g}g)` : '';
-    lines.push(`  ${item.name}${g} — ${item.calories} kcal · ${item.protein}g P · ${item.carbs}g C · ${item.fat}g F`);
+    // defensive: drop a weight the model may have baked into the name so it isn't shown twice ("(200g) (200g)")
+    const nm = item.weight_g ? String(item.name || '').replace(/\s*\(\s*\d+\s*g\s*\)\s*$/i, '').trim() : item.name;
+    lines.push(`  ${nm}${g} — ${item.calories} kcal · ${item.protein}g P · ${item.carbs}g C · ${item.fat}g F${_placeLabel(item.place)}`);
   }
 
   lines.push('');
@@ -67,21 +69,111 @@ function formatPreview(data) {
 const _MEAL_ACTION_ROW = [
   { text: '✅ Log', callback_data: 'mc:log' }, { text: '✏️ Edit', callback_data: 'mc:edit' }, { text: '❌ Cancel', callback_data: 'mc:cancel' },
 ];
-// #3 — for a place-worthy dish (or one that already has saved venues), offer a place picker above the
-// Log row. Saved venues swap in their own macros; 🏠 Home logs the plain dish; 🆕 New place asks a name.
-// Generic foods get the normal Log/Edit/Cancel keyboard, untouched.
-function buildMealKeyboard(chatId, data) {
-  let variants = [];
-  try { variants = db.getPlaceVariants(chatId, data.meal_name); } catch {}
-  data._placeVariants = variants.map(v => ({ place: v.place, name: v.name, calories: v.calories, protein: v.protein, carbs: v.carbs, fat: v.fat }));
-  const needPlaceUI = !!data.place || data.place_worthy === true || variants.length > 0;
-  if (!needPlaceUI) return { reply_markup: { inline_keyboard: [_MEAL_ACTION_ROW] } };
+// #3 resolver — an item still needs placing if the AI flagged it needs_place and it isn't resolved yet.
+// NS/institution & generic items are place_state:'n/a' → never asked (this structurally kills the
+// NS-Caesar picker bug). 'resolved' (has a venue/Home) and 'estimated' (user tapped 🤖 Estimate) are done.
+function unplacedItems(data) {
+  const items = data.items || [];
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it.place_state === 'needs_place' && !it.place) out.push(i);
+  }
+  return out;
+}
+function firstAskableItem(data) {
+  const u = unplacedItems(data);
+  return u.length ? u[0] : -1;
+}
+function placeKeyboardForItem(chatId, data, i) {
+  const it = data.items[i];
+  let vs = []; try { vs = db.getPlaceVariants(chatId, it.name); } catch {}
+  it._placeVariants = vs;
   const rows = [];
-  const vb = data._placeVariants.slice(0, 4).map((v, i) => ({ text: `📍 ${v.place}`, callback_data: `pl:pick:${i}` }));
-  for (let i = 0; i < vb.length; i += 2) rows.push(vb.slice(i, i + 2));
-  rows.push([{ text: '🏠 Home', callback_data: 'pl:home' }, { text: '🆕 New place', callback_data: 'pl:new' }]);
+  const vb = vs.slice(0, 4).map((v, vi) => ({ text: `📍 ${v.place}`, callback_data: `pl:item:${i}:pick:${vi}` }));
+  for (let k = 0; k < vb.length; k += 2) rows.push(vb.slice(k, k + 2));
+  rows.push([
+    { text: '🏠 Home',      callback_data: `pl:item:${i}:home` },
+    { text: '🆕 New place', callback_data: `pl:item:${i}:new` },
+    { text: '🤖 Estimate',  callback_data: `pl:item:${i}:est` },
+  ]);
   rows.push(_MEAL_ACTION_ROW);
   return { reply_markup: { inline_keyboard: rows } };
+}
+// Phase 3 — batch shortcut: when ≥2 dishes still need a place, offer "all from the same place?" first,
+// surfacing venues where the user has had ALL of them (combo). 'Set each' drops to the per-item resolver.
+function renderBatchStep(chatId, data, unplaced) {
+  const names = unplaced.map(i => data.items[i].name);
+  let shared = []; try { shared = db.getComboVenues(chatId, names); } catch {}
+  data._batchVenues = shared;
+  const rows = [];
+  const vb = shared.slice(0, 4).map((p, vi) => ({ text: `📍 ${p}`, callback_data: `pl:all:pick:${vi}` }));
+  for (let k = 0; k < vb.length; k += 2) rows.push(vb.slice(k, k + 2));
+  rows.push([
+    { text: '🏠 Home',      callback_data: 'pl:all:home' },
+    { text: '🆕 New place', callback_data: 'pl:all:new' },
+    { text: '✳️ Set each',  callback_data: 'pl:all:each' },
+  ]);
+  rows.push(_MEAL_ACTION_ROW);
+  const list = names.map(n => n.toLowerCase()).join(' + ');
+  return { text: `${formatPreview(data)}\n📍 ${list} — all from the same place?`, keyboard: { reply_markup: { inline_keyboard: rows } } };
+}
+// One resolver step: batch prompt for ≥2 unplaced dishes, else ask the first unplaced one, else show the
+// normal Log/Edit/Cancel preview. ✅ Log at any time estimates the rest.
+function renderMealStep(chatId, data) {
+  const unplaced = unplacedItems(data);
+  if (unplaced.length === 0) return { text: formatPreview(data), keyboard: { reply_markup: { inline_keyboard: [_MEAL_ACTION_ROW] } } };
+  if (unplaced.length >= 2 && !data._setEach) return renderBatchStep(chatId, data, unplaced);
+  const i = unplaced[0];
+  const it = data.items[i];
+  return { text: `${formatPreview(data)}\n📍 where's the ${it.name.toLowerCase()} from?`, keyboard: placeKeyboardForItem(chatId, data, i) };
+}
+// Assign a venue to one item — swapping in that venue's saved macros if we have them, else just tagging.
+function applyVenueToItem(chatId, data, i, venue) {
+  const it = (data.items || [])[i];
+  if (!it) return;
+  let v = null;
+  try { v = db.getPlaceVariants(chatId, it.name).find(x => x.place?.toLowerCase() === venue.toLowerCase()); } catch {}
+  if (v) applyItemVariant(data, i, v);
+  else { it.place = venue; it.place_state = 'resolved'; resumTotals(data); }
+}
+
+// Carry resolved per-item places across a correction (match by normalized name) so a portion fix
+// doesn't wipe a venue the user already chose.
+function carryPlaces(oldData, newData) {
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const byName = new Map((oldData?.items || []).filter(i => i.place || i.place_state).map(i => [norm(i.name), i]));
+  for (const it of (newData?.items || [])) {
+    const o = byName.get(norm(it.name));
+    if (o) { if (o.place) it.place = o.place; if (o.place_state) it.place_state = o.place_state; }
+  }
+  return newData;
+}
+
+// Re-sum the meal totals from its items (after a per-item macro swap).
+function resumTotals(data) {
+  const t = { calories: 0, protein: 0, carbs: 0, fat: 0 };
+  for (const it of (data.items || [])) { t.calories += it.calories || 0; t.protein += it.protein || 0; t.carbs += it.carbs || 0; t.fat += it.fat || 0; }
+  data.totals = { calories: Math.round(t.calories), protein: Math.round(t.protein), carbs: Math.round(t.carbs), fat: Math.round(t.fat) };
+}
+// Swap ONE item's macros to a saved place-variant (replaces the old whole-meal-collapsing applyPlaceVariant).
+function applyItemVariant(data, itemIdx, v) {
+  const it = (data.items || [])[itemIdx];
+  if (!it) return;
+  it.calories = Math.round(v.calories); it.protein = Math.round(v.protein); it.carbs = Math.round(v.carbs); it.fat = Math.round(v.fat);
+  it.place = v.place; it.place_state = 'resolved';
+  resumTotals(data);
+}
+// For items the user already placed (stated a venue), use that venue's saved macros if we have them.
+function applyResolvedPlaces(chatId, data) {
+  for (const it of (data.items || [])) {
+    if (it.place_state !== 'resolved' || !it.place || /^home$/i.test(it.place)) continue;
+    try {
+      const v = db.getPlaceVariants(chatId, it.name).find(x => x.place?.toLowerCase() === it.place.toLowerCase());
+      if (v) { it.calories = Math.round(v.calories); it.protein = Math.round(v.protein); it.carbs = Math.round(v.carbs); it.fat = Math.round(v.fat); }
+    } catch {}
+  }
+  resumTotals(data);
 }
 
 function progressBar(actual, target, width = 6) {
@@ -116,14 +208,6 @@ function formatConfirmation(data, totals, targets) {
   return lines.join('\n');
 }
 
-// Swap a meal's macros to a saved place-variant (used when the user picks a known venue).
-function applyPlaceVariant(data, v) {
-  const t = { calories: Math.round(v.calories), protein: Math.round(v.protein), carbs: Math.round(v.carbs), fat: Math.round(v.fat) };
-  data.totals = t;
-  data.items = [{ name: data.meal_name, ...t }];
-  data.place = v.place;
-}
-
 async function showMealPreview(bot, msg, photos) {
   const chatId    = msg.chat.id;
   const photoList = Array.isArray(photos) ? photos : (photos ? [photos] : []);
@@ -148,8 +232,10 @@ async function showMealPreview(bot, msg, photos) {
         if (m) {
           const t = { calories: Math.round(m.calories), protein: Math.round(m.protein), carbs: Math.round(m.carbs), fat: Math.round(m.fat) };
           const name = cleanFoodName(m.name); // hide internal [Odd Week]/[Dinner Tue] day markers from the user
+          // B5 match = a known repeat food (generic / institution) → no place question (items lack needs_place).
           const data = { meal_name: name, _hasPhoto: false, items: [{ name, ...t }], totals: t, caffeine_mg: 0, confidence: 'high', _fromKnownFood: true };
-          await bot.sendMessage(chatId, formatPreview(data), buildMealKeyboard(chatId, data));
+          const step = renderMealStep(chatId, data);
+          await bot.sendMessage(chatId, step.text, step.keyboard);
           return data;
         }
       } catch (e) { console.error('Known-meal match error:', e.message); /* fall through to AI */ }
@@ -175,20 +261,21 @@ async function showMealPreview(bot, msg, photos) {
       }
     }
 
-    if (data.confidence === 'low' && data.clarification) {
+    // A low-confidence meal only BLOCKS with a question when it's genuinely unloggable (no usable
+    // estimate). If the meal already has a real estimate, never block — show the preview + Log/Edit/
+    // Cancel and demote the clarification to a one-line hint, so the user just taps (Edit if off).
+    const loggable = (data.items || []).length > 0 && (data.totals?.calories ?? 0) > 0;
+    if (data.confidence === 'low' && data.clarification && !loggable) {
       await bot.sendMessage(chatId, `🤔 ${data.clarification}`);
       data._needsClarification = true;
       return data;
     }
+    const hint = (data.confidence === 'low' && data.clarification) ? `ⓘ ${data.clarification}\n\n` : '';
 
-    // #3 — if the AI named a venue we already have macros for, use that venue's macros.
-    if (data.place && !/^home$/i.test(data.place)) {
-      try {
-        const v = db.getPlaceVariants(chatId, data.meal_name).find(x => x.place?.toLowerCase() === data.place.toLowerCase());
-        if (v) applyPlaceVariant(data, v);
-      } catch {}
-    }
-    await bot.sendMessage(chatId, formatPreview(data), buildMealKeyboard(chatId, data));
+    // #3 — for items the user already named a venue for, use that venue's saved macros if we have them.
+    applyResolvedPlaces(chatId, data);
+    const step = renderMealStep(chatId, data);
+    await bot.sendMessage(chatId, hint + step.text, step.keyboard);
     return data;
   } catch (err) {
     console.error('Meal preview error:', err.message, err.stack);
@@ -206,8 +293,15 @@ async function logMeal(bot, chatId, data, dayStart) {
     const caffeineMg = data.caffeine_mg ?? 0;
     if (caffeineMg > 0) db.addCaffeine(chatId, caffeineMg);
     if (!data.date) { try { db.addKnownFood(chatId, data); } catch {} }
-    // #3 — remember this dish's macros for the venue, so next time it's a one-tap button.
-    if (data.place && !/^home$/i.test(data.place)) { try { db.savePlaceVariant(chatId, data.meal_name, data.place, data.totals); } catch {} }
+    // #3 — per item: remember each placed dish's macros for its venue, and tag the meal's place
+    // (one venue → that venue; multiple → "mixed"). Only real, user-confirmed venues are saved.
+    try {
+      for (const it of (data.items || [])) {
+        if (it.place && !/^home$/i.test(it.place)) db.savePlaceVariant(chatId, it.name, it.place, it);
+      }
+      const places = [...new Set((data.items || []).map(it => it.place).filter(Boolean))];
+      data.place = places.length === 1 ? places[0] : places.length > 1 ? 'mixed' : null;
+    } catch {}
 
     let totals  = null;
     let targets = null;
@@ -233,4 +327,4 @@ async function applyCorrection(bot, chatId, existingData, correctionText) {
   }
 }
 
-module.exports = { showMealPreview, logMeal, applyCorrection, formatPreview, formatConfirmation, matchKnownMeal, buildMealKeyboard, applyPlaceVariant };
+module.exports = { showMealPreview, logMeal, applyCorrection, formatPreview, formatConfirmation, matchKnownMeal, renderMealStep, placeKeyboardForItem, applyItemVariant, applyVenueToItem, resumTotals, firstAskableItem, unplacedItems, carryPlaces };

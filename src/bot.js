@@ -4,7 +4,7 @@ const db      = require('./db');
 const cronSvc = require('./cron');
 const claude  = require('./claude');
 const day     = require('./handlers/day');
-const { showMealPreview, logMeal, applyCorrection, formatPreview, buildMealKeyboard, applyPlaceVariant } = require('./handlers/meal');
+const { showMealPreview, logMeal, applyCorrection, formatPreview, renderMealStep, applyItemVariant, applyVenueToItem, carryPlaces } = require('./handlers/meal');
 const { showWorkoutPreview, logWorkout, formatWorkoutPreview, computeWorkoutCalories, formatExerciseLine } = require('./handlers/workout');
 const { handleRecovery }    = require('./handlers/recovery');
 const { closeChain }        = require('./handlers/ask');
@@ -411,7 +411,8 @@ async function mealButtonAction(bot, chatId, action) {
   } else { // log
     if (state.needsClarification) {
       setPendingState(chatId, { ...state, needsClarification: false });
-      await bot.sendMessage(chatId, formatPreview(mealData), MEAL_PREVIEW_KB);
+      const step = renderMealStep(chatId, mealData);
+      await bot.sendMessage(chatId, step.text, step.keyboard);
       return;
     }
     pendingStates.delete(chatId);
@@ -420,24 +421,53 @@ async function mealButtonAction(bot, chatId, action) {
   }
 }
 
-// #3 — place picker on a meal preview. rest = "pick:<idx>" | "home" | "new"
+// #3 — place picker. rest = "item:<i>:<action>[:v]" (per dish) | "all:<action>[:v]" (batch, all unplaced)
 async function mealPlaceButton(bot, chatId, rest) {
-  const [sub, idx] = rest.split(':');
+  const parts = rest.split(':');
   const state = pendingStates.get(chatId);
   if (!state || state.type !== 'meal_confirm') return;
   const data = state.mealData;
+
+  // Batch: apply one choice to every still-unplaced dish (Phase 3 "same place for all" shortcut).
+  if (parts[0] === 'all') {
+    const sub = parts[1], v = parts[2];
+    const unplaced = (data.items || []).map((it, idx) => ({ it, idx })).filter(x => x.it.place_state === 'needs_place' && !x.it.place).map(x => x.idx);
+    if (sub === 'pick') {
+      const venue = (data._batchVenues || [])[+v];
+      if (venue) for (const idx of unplaced) applyVenueToItem(chatId, data, idx, venue);
+    } else if (sub === 'home') {
+      for (const idx of unplaced) { data.items[idx].place = 'Home'; data.items[idx].place_state = 'resolved'; }
+    } else if (sub === 'each') {
+      data._setEach = true; // drop to the per-item resolver
+    } else if (sub === 'new') {
+      setPendingState(chatId, { ...state, awaitingPlace: { all: true } });
+      await bot.sendMessage(chatId, 'which place are they all from? type the name (e.g. "Tony\'s")');
+      return;
+    }
+    setPendingState(chatId, { ...state, mealData: data });
+    const step = renderMealStep(chatId, data);
+    await bot.sendMessage(chatId, step.text, step.keyboard);
+    return;
+  }
+
+  const i = +parts[1], sub = parts[2], v = parts[3];
+  const it = (data.items || [])[i];
+  if (!it) return;
   if (sub === 'pick') {
-    const v = (data._placeVariants || [])[+idx];
-    if (v) applyPlaceVariant(data, v);
+    const variant = (it._placeVariants || [])[+v];
+    if (variant) applyItemVariant(data, i, variant);
   } else if (sub === 'home') {
-    data.place = 'Home';
+    it.place = 'Home'; it.place_state = 'resolved';
+  } else if (sub === 'est') {
+    it.place_state = 'estimated'; // keep the AI estimate, no venue
   } else if (sub === 'new') {
-    setPendingState(chatId, { ...state, awaitingPlace: true });
-    await bot.sendMessage(chatId, 'which place? type the name (e.g. "Tony\'s")');
+    setPendingState(chatId, { ...state, awaitingPlace: { itemIdx: i } });
+    await bot.sendMessage(chatId, `which place is the ${it.name.toLowerCase()} from? type the name (e.g. "Tony's")`);
     return;
   }
   setPendingState(chatId, { ...state, mealData: data });
-  await bot.sendMessage(chatId, formatPreview(data), buildMealKeyboard(chatId, data));
+  const step = renderMealStep(chatId, data);
+  await bot.sendMessage(chatId, step.text, step.keyboard);
 }
 
 async function workoutButtonAction(bot, chatId, action) {
@@ -878,6 +908,26 @@ function startBot() {
         return;
       }
 
+      // #4 — user is answering the "tell me about this new exercise" question. If they instead moved on
+      // to a real action, drop the enrichment and route normally; otherwise treat the text as the
+      // description and enrich the catalog entry.
+      if (state.type === 'exercise_enrich') {
+        const ACTION = ['MEAL_LOG','DRINK_LOG','WORKOUT_LOG','WORKOUT_START','SLEEP_LOG','WEIGHT_LOG','RECOVERY_LOG','PLAN','PLAN_DONE','DELETE','CORRECTION','RENAME'];
+        if (earlyIntents.some(i => ACTION.includes(i))) {
+          pendingStates.delete(chatId);
+          await routeMessage(bot, msg, chatId, db.getState(chatId), earlyIntents);
+          return;
+        }
+        await bot.sendChatAction(chatId, 'typing');
+        const saved = [];
+        for (const n of (state.names || [])) {
+          try { const a = await claude.enrichExercise(n, msg.text || ''); if (a && db.updateCatalogEnrichment(chatId, n, a, 'user-described')) saved.push(n); } catch {}
+        }
+        pendingStates.delete(chatId);
+        await bot.sendMessage(chatId, saved.length ? `👍 got it — I'll remember ${saved.join(', ')}.` : 'noted, thanks.');
+        return;
+      }
+
       if (state.type === 'morning_quality') {
         const quality = parseQuality(msg.text || '');
         if (!quality) {
@@ -1108,13 +1158,21 @@ function startBot() {
         const text = msg.text || '';
         const mealData = state.retroDate ? { ...state.mealData, date: state.retroDate } : state.mealData;
 
-        // #3 — user is typing a venue name after tapping 🆕 New place
+        // #3 — user is typing a venue name after tapping 🆕 New place (for a specific item)
         if (state.awaitingPlace) {
           const place = text.trim().replace(/^(from|at|@)\s+/i, '').replace(/[.!]+$/, '').trim().slice(0, 40);
           if (!place) { await bot.sendMessage(chatId, 'type the place name (or tap ❌ Cancel)'); return; }
-          state.mealData.place = place;
-          setPendingState(chatId, { ...state, awaitingPlace: false });
-          await bot.sendMessage(chatId, formatPreview(state.mealData), buildMealKeyboard(chatId, state.mealData));
+          if (state.awaitingPlace.all) {
+            for (const it of (state.mealData.items || [])) {
+              if (it.place_state === 'needs_place' && !it.place) { it.place = place; it.place_state = 'resolved'; }
+            }
+          } else {
+            const it = (state.mealData.items || [])[state.awaitingPlace.itemIdx];
+            if (it) { it.place = place; it.place_state = 'resolved'; }
+          }
+          setPendingState(chatId, { ...state, awaitingPlace: null });
+          const step = renderMealStep(chatId, state.mealData);
+          await bot.sendMessage(chatId, step.text, step.keyboard);
           return;
         }
 
@@ -1144,8 +1202,10 @@ function startBot() {
           pendingStates.delete(chatId);
           const updated = await applyCorrection(bot, chatId, mealData, text);
           if (!updated) return;
-          await bot.sendMessage(chatId, formatPreview(updated), MEAL_PREVIEW_KB);
+          carryPlaces(mealData, updated);
           setPendingState(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+          const step = renderMealStep(chatId, updated);
+          await bot.sendMessage(chatId, step.text, step.keyboard);
           return;
         }
 
@@ -1155,7 +1215,8 @@ function startBot() {
           if (state.needsClarification) {
             // Show the preview so user sees what's being logged, then await final confirm
             setPendingState(chatId, { ...state, needsClarification: false });
-            await bot.sendMessage(chatId, formatPreview(mealData), MEAL_PREVIEW_KB);
+            const step = renderMealStep(chatId, mealData);
+            await bot.sendMessage(chatId, step.text, step.keyboard);
             return;
           }
           pendingStates.delete(chatId);
@@ -1171,8 +1232,10 @@ function startBot() {
         {
           const updated = await applyCorrection(bot, chatId, mealData, text);
           if (!updated) return;
-          await bot.sendMessage(chatId, formatPreview(updated), MEAL_PREVIEW_KB);
+          carryPlaces(mealData, updated);
           setPendingState(chatId, { type: 'meal_confirm', mealData: updated, dayStart: state.dayStart, retroDate: state.retroDate, catchupRetro: state.catchupRetro });
+          const step = renderMealStep(chatId, updated);
+          await bot.sendMessage(chatId, step.text, step.keyboard);
         }
         return;
       }

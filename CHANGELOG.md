@@ -4,12 +4,33 @@ All notable changes to the health-bot, newest first. Each entry says what change
 
 ## 2026-06-26
 
-### Restaurant meals — per-dish place-variants (#3)
-- **Dishes can now remember where you ate them, with the right macros per venue.** When you log a specific prepared dish (pizza, burger, ramen, pad thai…), the preview offers a place picker; generic foods (a banana, boiled eggs, coffee, a protein shake) are never asked.
-  - Name the venue inline — "pepperoni pizza **from Tony's**" — and it's captured + saved automatically.
-  - Next time you log that dish, its saved venues appear as one-tap buttons: `📍 Tony's  📍 Luigi's  //  🏠 Home  🆕 New place`. Tapping a venue swaps in **that venue's** macros; 🏠 Home logs the plain dish; 🆕 New place asks for a name.
-  - Each venue keeps its own calorie/macro count, so "Pizza @ Tony's" (800) and "Pizza @ Luigi's" (650) stay distinct.
-- The instant-repeat-logger no longer silently matches a plain dish name to one saved venue — a bare mention always offers the picker so you choose. Every logged meal is now tagged with its place. — `db.js` (place/base_name on known_foods, place on meal_log, getPlaceVariants/savePlaceVariant), `claude.js` (place + place_worthy fields), `handlers/meal.js`, `bot.js`
+### Restaurant meals — per-item places + resolver (#3, rebuilt via council)
+- **Place is now per-DISH, not per-message** — you can log several dishes from different places at once. The bot reads the places you state and asks (one tap each) only for the dishes it still doesn't know.
+  - "pizza from Tony's, homemade pasta, milkshake from Shake Shack" → 0 taps, three places captured from your words.
+  - "pizza and carbonara from Luigi's" → both @ Luigi's (a trailing place applies to the whole list).
+  - "carbonara from Luigi's and a milkshake" → asks ONLY the milkshake (carbonara already placed).
+  - Each unplaced dish gets `📍 saved venues · 🏠 Home · 🆕 New place · 🤖 Estimate`. **🤖 Estimate** = just use the standard AI estimate, no venue — a one-tap escape so a place question is never a blocker.
+- **The NS / generic picker bug is fixed structurally** — institution (NS) items and generic foods (banana, eggs, coffee) are marked `n/a` and can never trigger a place question. (Was: an NS Caesar + roast beef wrongly showed Home/Other.)
+- **Fixed a real bug**: picking a venue used to collapse the whole meal to one item — now it swaps just that item's macros and re-sums. Corrections keep a venue you already chose. — `claude.js` (per-item place/place_state + trailing-place rule), `handlers/meal.js` (resolver: firstAskableItem/renderMealStep/applyItemVariant/carryPlaces), `bot.js` (per-item pl:item callbacks)
+- Shortcuts (one-tap "same place for all" + known-combo row) are the next phase.
+
+
+### Meal logging fixes (NS + estimate)
+- **A simple food you add to an institution meal is now just estimated, not re-asked.** Logging "caesar salad from NS and 200g of lean roast beef" used to stop and ask "is the roast beef from NS too?", and answering it re-analyzed the whole meal from scratch — which made the roast beef's calories swing (lean → "usual" → 500). Now a common identifiable food that isn't on the menu is estimated at high confidence with no question; only genuinely unidentifiable items still ask. — `claude.js` (KNOWN FOODS RULES)
+- **No more doubled portion** like "Roast beef (200g) (200g)" — the model is told to keep the weight out of the name, and the preview strips it defensively. — `claude.js`, `handlers/meal.js`
+
+### Custom-exercise enrichment (#4)
+- **New exercises the bot doesn't know now get learned, not just stored.** When you log an unfamiliar exercise, it derives the muscles, equipment, mechanic, and (for cardio) MET from the name + your wording — so "cossack squat" is saved as quads/glutes/adductors, bodyweight; "pendlay row" as back/lats, barbell.
+- **If it genuinely can't identify it, it asks** — a short question list ("which muscles? what equipment? one side at a time?") you can reply to in plain words, and it remembers. Reply or just keep going (it keeps a best guess). Recognized exercises are enriched silently; retro/catch-up logs aren't interrupted. — `claude.js` (enrichExercise), `db.js` (getAutoCapturedCustoms / updateCatalogEnrichment), `handlers/workout.js`, `bot.js` (exercise_enrich state)
+
+### Restaurant meals — per-item places + resolver (#3, rebuilt via council)
+- **Place is per-DISH, not per-message** — log several dishes from different places at once. The bot reads the places you state and asks (one tap each) only for the dishes it still doesn't know.
+  - "pizza from Tony's, homemade pasta, milkshake from Shake Shack" → 0 taps, three places captured from your words.
+  - "pizza and carbonara from Luigi's" → both @ Luigi's (a trailing place applies to the whole list).
+  - "carbonara from Luigi's and a milkshake" → asks **only** the milkshake.
+  - Each unplaced dish gets `📍 saved venues · 🏠 Home · 🆕 New place · 🤖 Estimate`. **🤖 Estimate** = standard AI estimate, no venue — a one-tap escape so a place question is never a blocker. The bot asks even for brand-new dishes (you can add the first venue or skip).
+  - **Same-place shortcut**: ≥2 unplaced dishes → "all from the same place?" with venues you've had them all at (combo) → one tap places everything.
+- **NS/institution & generic items can never trigger a place question** (structural fix for the NS-Caesar bug). Picking a venue swaps just that item's macros and re-sums (was: collapsed the whole meal). Specialty drinks (milkshake/smoothie) are place-worthy; coffee/tea/alcohol are not. Corrections keep a venue you chose. — `claude.js` (per-item place/place_state + trailing-place rule), `handlers/meal.js` (resolver: renderMealStep/firstAskableItem/applyItemVariant/carryPlaces), `db.js` (place/base_name on known_foods, place on meal_log, getPlaceVariants/savePlaceVariant/getComboVenues), `bot.js`
 
 
 ### Golf logging — button wizard (#1, final)

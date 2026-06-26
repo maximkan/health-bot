@@ -433,6 +433,13 @@ function getPlaceVariants(chatId, baseName) {
   return db.prepare(`SELECT name, place, serving, calories, protein, carbs, fat FROM known_foods
     WHERE chat_id=? AND place IS NOT NULL AND place!='' AND lower(COALESCE(base_name,name))=? ORDER BY id`).all(chatId, b);
 }
+// #3 Phase 3 — venues where the user has had ALL of these dishes (intersection of each dish's saved
+// venues). Powers the one-tap "same place for all" / known-combo shortcut.
+function getComboVenues(chatId, names) {
+  const sets = (names || []).map(n => new Set(getPlaceVariants(chatId, n).map(v => v.place)));
+  if (!sets.length) return [];
+  return [...sets[0]].filter(p => sets.every(s => s.has(p)));
+}
 function savePlaceVariant(chatId, baseName, place, t) {
   if (!baseName || !place || /^home$/i.test(place.trim())) return;
   const p = place.trim();
@@ -517,6 +524,30 @@ function canonicalizeExercise(chatId, name) {
     }
   }
   return { name: row ? row.canonical_name : name, unilateral: row ? !!row.unilateral : null, catalog: row };
+}
+
+// #4 — names that have a freshly auto-captured (un-enriched) custom catalog entry, so we can enrich them.
+function getAutoCapturedCustoms(chatId, names) {
+  const out = [];
+  for (const n of (names || [])) {
+    const nn = _normEx(n);
+    if (!nn) continue;
+    const row = db.prepare("SELECT id FROM exercise_catalog WHERE norm_name=? AND chat_id=? AND is_custom=1 AND source='auto' LIMIT 1").get(nn, chatId);
+    if (row) out.push(n);
+  }
+  return out;
+}
+// #4 — write derived attributes onto a custom catalog entry (source becomes 'enriched' or 'user-described').
+function updateCatalogEnrichment(chatId, name, a, source = 'enriched') {
+  const nn = _normEx(name);
+  if (!nn || !a) return false;
+  const r = db.prepare(`UPDATE exercise_catalog SET category=?, equipment=?, primary_muscles=?, secondary_muscles=?, mechanic=?, met=?, unilateral=?, description=?, source=?
+    WHERE norm_name=? AND chat_id=? AND is_custom=1`).run(
+    a.category || 'strength', a.equipment || null,
+    JSON.stringify(a.primary_muscles || []), JSON.stringify(a.secondary_muscles || []),
+    a.mechanic || null, (a.met != null ? a.met : null), a.unilateral ? 1 : 0, a.description || null, source,
+    nn, chatId);
+  return r.changes > 0;
 }
 
 // One-time migration: canonicalize existing known_exercises (dedupe case/plural/stem variants, keep most
@@ -1090,7 +1121,8 @@ module.exports = {
   saveHistory, getHistory,
   setPendingStateDb, getPendingStateDb, hasPendingStateDb, deletePendingStateDb,
 upsertKnownFood, knownFoodExists, getKnownFoodsForDay, getAllKnownFoods, clearKnownFoods,
-  getPlaceVariants, savePlaceVariant,
+  getPlaceVariants, savePlaceVariant, getComboVenues,
+  getAutoCapturedCustoms, updateCatalogEnrichment,
   upsertKnownExercise, getKnownExercises, resolveCatalogExercise, catalogWorkoutMet, canonicalizeExercise, migrateExerciseNames,
   getTargetsFromDb, setTargetsInDb,
   saveMealLog, getDayDataFromSQLite, getDailyMealTotalsFromSQLite,

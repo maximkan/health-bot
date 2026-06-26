@@ -34,7 +34,7 @@ Intents:
 - WEIGHT_LOG: logging body weight or body fat
 - BED: RIGHT NOW going to sleep — present intent only ("gn", "good night", "going to sleep", "heading to bed", "night", "спать", "спокойной ночи")
 - WAKE: waking up, morning, first message, доброе утро
-- PLAN: creating a plan, reminder, event, scheduling something
+- PLAN: an EXPLICIT request to schedule or be reminded of a commitment ("remind me to X", "I need to call the dentist at 3pm", "gym tomorrow at 10am"). A QUESTION asking what to do, or merely musing about a future intention ("I'm planning to X tomorrow, what's best?", "thinking of doing X, any tips?"), is NOT a plan — it's COACH_QUESTION. When a message both states a future intention AND asks for advice, it is a COACH_QUESTION only — do NOT add PLAN.
 - PLAN_DONE: confirming a task is done
 - PLAN_SKIP: skipping or postponing a plan
 - CORRECTION: editing a value or time on the user's OWN previously logged entry (meal/workout/etc). NOT for statements of fact about the date, calendar, day of week, or correcting the bot's knowledge — those are COACH_QUESTION.
@@ -57,6 +57,10 @@ Return ALL intents that apply. Examples:
 "started my workout" → ["WORKOUT_START"]
 "at the gym" → ["WORKOUT_START"]
 "gym tomorrow at 10am" → ["PLAN"]
+"remind me to take creatine at 8am" → ["PLAN"]
+"im planning to wake up early tomorrow for recovery, what's the best sauna and cold plunge protocol?" → ["COACH_QUESTION"]
+"thinking of hitting the gym tomorrow, what should i train?" → ["COACH_QUESTION"]
+"i want to do a depuff session, any tips?" → ["COACH_QUESTION"]
 "cancel" → ["GENERAL"]
 "nevermind" → ["GENERAL"]
 "vacation started" → ["VACATION_START"]
@@ -152,8 +156,9 @@ KNOWN FOODS RULES (when a Known Foods section is provided):
 - If no Institution trigger keywords block is present: do not apply any institution matching. Analyze the food normally from the photo or description.
 - For all other cases: analyze the food as-is from the photo/description, match individual items to Known Foods entries where they clearly match, and use those macros; only adjust for portion size
 - If you see an item that looks like a DIFFERENT food from what's in Known Foods (e.g., rice on plate but Known Foods shows pasta): set confidence="low", clarification="I see [what you see] on the plate but today's menu shows [known foods entry] — did they swap it? Tell me what to use."
-- If an item has no match at all in Known Foods: set new_food=true, confidence="low", clarification="[item] isn't in today's database — what should I use for macros?"
-- If the photo could plausibly not be an institution meal (restaurant plating, single dish, home-cooked style) and institution keywords were triggered: set confidence="low", clarification="Is this an institution meal? (yes/no)"
+- If an item has no match in Known Foods but is a common, identifiable food (e.g. roast beef, an apple, grilled chicken, a sandwich, a protein bar) — including a food the user clearly brought/added alongside an institution meal — ESTIMATE its macros normally from your own knowledge and keep confidence="high" (you may set new_food=true). Do NOT ask. The user adding their own simple food to a menu meal is normal — just estimate it as the usual version of that food.
+- Only set confidence="low" with a clarification when an item is genuinely UNIDENTIFIABLE (you truly cannot estimate it) — not merely absent from the menu.
+- If the WHOLE plate could plausibly be a non-institution meal (e.g. a single unfamiliar restaurant dish) and institution keywords were triggered: set confidence="low", clarification="Is this an institution meal? (yes/no)". Do NOT trigger this just because one accompanying item isn't on the menu.
 - Never invent macros for items that exist in Known Foods — match and use, don't re-estimate
 
 Parse time from the message in any format ("at 12:30", "at 11 30 am", "around noon", "just now", "1pm", "13:00") → always output as 24h "HH:MM". Omit time field only if truly no time mentioned.
@@ -172,14 +177,20 @@ Respond ONLY with this JSON:
   "caffeine_mg": 0,
   "confidence": "high",
   "clarification": null,
-  "new_food": false,
-  "place": null,
-  "place_worthy": false
+  "new_food": false
 }
 
-PLACE RULES (restaurant/venue tracking):
-- "place": the venue/restaurant the food is from, IF the user names one ("pizza from Tony's", "burger at Five Guys", "Starbucks latte", "McDonald's") → the venue name (e.g. "Tony's", "Five Guys", "Starbucks"). If they say it's homemade/"I made"/"at home" → "Home". Otherwise null. Do NOT invent a place.
-- "place_worthy": true if this is ONE specific prepared/composed dish whose macros plausibly differ by venue (pizza, burger, ramen, pad thai, biryani, sushi roll, burrito, sandwich, pasta dish, fried chicken). false for generic single ingredients or staples where venue is irrelevant (a banana, boiled eggs, plain rice, oatmeal, a protein shake, black coffee, water, plain yogurt) and for multi-item institution/menu plates.
+Each entry in "items" ALSO carries two place fields, e.g.:
+  {"name": "Pepperoni Pizza", "weight_g": 300, "calories": 850, "protein": 30, "carbs": 90, "fat": 38, "place": "Tony's", "place_state": "resolved"}
+
+PLACE RULES (per item — restaurant/venue tracking):
+- "place_state" is exactly one of:
+  - "n/a" — a generic single food/ingredient or plain staple where the venue is irrelevant (a banana, boiled eggs, plain rice, oatmeal, a plain/homemade protein shake, plain yogurt, a piece of fruit), ANY coffee/tea drink (latte, cappuccino, americano, etc.), ANY alcohol (wine, beer, cocktails), water, OR ANY institution / known-menu item (e.g. a Network School "NS" item, a cafeteria/canteen plate). These must NEVER be asked where they're from. Set "place": null.
+  - "resolved" — the user stated where this item is from, OR it is homemade. Set "place" to the venue name (e.g. "Tony's", "Five Guys", "Starbucks") or "Home" for homemade / "I made" / "at home".
+  - "needs_place" — a specific prepared/restaurant-style dish, OR a dessert/shop drink that clearly varies by venue, for which the user did NOT state a source: pizza, burger, ramen, pad thai, biryani, sushi roll, burrito, sandwich, pasta dish, fried chicken — and dessert/shop drinks like a milkshake, smoothie, bubble tea, or fresh juice. (NOT coffee/tea/alcohol — those are "n/a".) Set "place": null.
+- Never invent a place the user did not state.
+- TRAILING PLACE: if the user names ONE place at the END of a list of dishes ("pizza and carbonara from Tony's", "burger and fries, Five Guys") → apply that place to ALL the place-worthy items in that list; each becomes "resolved" with that place.
+- INLINE PLACE: a place stated next to a specific item ("pizza from Tony's and a homemade pasta") binds to that item only; each item keeps its own place/state.
 
 meal_type (time-based unless it's a drink):
 - Any beverage → "Drink"
@@ -191,6 +202,7 @@ meal_type (time-based unless it's a drink):
 
 caffeine_mg: estimate based on drink type. 0 for food.
 Omit time field if no specific time mentioned.
+Do NOT put the weight/portion in the item "name" — write "Roast beef", NOT "Roast beef (200g)". The portion goes in weight_g only.
 Set weight_g to null if unknown.
 Set clarification to a specific question only if confidence = "low".`;
 
@@ -756,6 +768,44 @@ async function applyMealCorrection(existingData, correction) {
   const parsed = parseJSON(response.content[0].text);
   if (!parsed) throw new Error('Could not parse correction response');
   return parsed;
+}
+
+// ── Custom exercise enrichment (#4) ──────────────────────────────────────────
+// Given a newly-seen exercise (and any description the user gave), derive catalog attributes —
+// or, if the name is too unknown to identify, return clarifying questions to ask the user.
+async function enrichExercise(name, context) {
+  const prompt = `Exercise the user logged: "${name}"${context ? `\nContext from their message: "${context}"` : ''}
+
+Identify it for a fitness catalog. Return ONLY JSON:
+{
+  "recognized": true,
+  "category": "strength",
+  "primary_muscles": ["quadriceps","glutes"],
+  "secondary_muscles": ["hamstrings","core"],
+  "equipment": "barbell",
+  "mechanic": "compound",
+  "unilateral": false,
+  "met": null,
+  "description": "one short line on how it's performed",
+  "questions": null
+}
+
+Rules:
+- category: strength | cardio | sport | mobility.
+- Recognize common AND less-common exercises (cossack squat, pendlay row, face pull, jefferson curl, copenhagen plank, etc.) → recognized=true with best-judgment attributes.
+- Use the user's context to disambiguate equipment/muscles when they mention it.
+- met: ONLY for cardio/sport (burpees ~8, jump rope ~12, rowing ~7, shadow boxing ~6); null for strength/mobility.
+- unilateral: true if performed one side at a time (lunges, single-arm work, pistol squats).
+- equipment: barbell | dumbbell | bodyweight | machine | cable | kettlebell | band | other | null.
+- mechanic: compound | isolation | null.
+- muscles (use these names): quadriceps, hamstrings, glutes, calves, chest, back, lats, shoulders, traps, biceps, triceps, forearms, core, full body.
+- ONLY if the name is genuinely too vague/unknown to identify, set recognized=false, put best-guess (or null) attributes, and 2-3 short clarifying questions in "questions" (e.g. "Which muscles does it mainly work?", "What equipment — barbell, dumbbell, machine, or bodyweight?", "One side at a time?").`;
+  const response = await anthropic.messages.create({
+    model: HAIKU, max_tokens: 512, temperature: 0,
+    system: 'You are a fitness exercise classifier. Identify exercises and return structured catalog attributes as JSON only.',
+    messages: [{ role: 'user', content: prompt }],
+  });
+  return parseJSON(response.content[0].text);
 }
 
 // ── Target update parsing ─────────────────────────────────────────────────────
@@ -1438,7 +1488,7 @@ RESOLVED:
 module.exports = {
   classify, parseRenameIntent,
   analyzeMeal, applyMealCorrection, parseTargetUpdate, recalculateTargets,
-  parseWorkout, nameWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseSleepQuality, parseBody,
+  parseWorkout, nameWorkout, applyWorkoutCorrection, parseRecovery, parseSleep, parseSleepQuality, parseBody, enrichExercise,
   parseLiveExercise, generateWorkoutComparison, generateWeeklyStrengthSummary,
   parsePlans, isNoPlanResponse, isPositiveResponse, isConfirmIntent, isDeclineIntent, isDoneIntent, parseTimeCorrection, parseCorrection,
   askCoach, askWithPhoto, continueCoachReply,
